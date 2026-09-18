@@ -3,10 +3,14 @@ import sys
 import os
 import subprocess
 import shutil
+import json
+import urllib.request
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QPushButton, QComboBox, QSpinBox, 
                              QFileDialog, QMessageBox, QGroupBox, QFormLayout)
 from PyQt5.QtCore import Qt
+
+CURRENT_VERSION = "v1.0.0"
 
 class PrintManagerApp(QWidget):
     def __init__(self):
@@ -71,8 +75,79 @@ class PrintManagerApp(QWidget):
         self.btn_action.clicked.connect(self.process_and_print)
         main_layout.addWidget(self.btn_action)
         
-        self.setLayout(main_layout)
+        # Botão de Atualização
+        self.btn_update = QPushButton(f"Verificar Atualizações (Atual: {CURRENT_VERSION})")
+        self.btn_update.setStyleSheet("background-color: #34495e; color: white; border-radius: 5px; padding: 5px;")
+        self.btn_update.clicked.connect(self.check_for_updates)
+        main_layout.addWidget(self.btn_update)
         
+        self.setLayout(main_layout)
+
+    def check_for_updates(self):
+        try:
+            self.btn_update.setText("Procurando...")
+            self.btn_update.setEnabled(False)
+            QApplication.processEvents()
+            
+            url = "https://api.github.com/repos/LucasTelesEriceira/gerenciador-impressoes/releases/latest"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req) as response:
+                data = json.loads(response.read().decode())
+                
+            latest_version = data.get("tag_name", "")
+            if latest_version and latest_version != CURRENT_VERSION:
+                reply = QMessageBox.question(
+                    self, 'Atualização Disponível!',
+                    f"Uma nova versão ({latest_version}) foi encontrada!\n\nDeseja baixar e atualizar agora?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+                )
+                
+                if reply == QMessageBox.Yes:
+                    self.perform_update(data)
+            else:
+                QMessageBox.information(self, "Atualizado", "Você já está usando a versão mais recente!")
+                
+        except Exception as e:
+            QMessageBox.warning(self, "Erro", f"Não foi possível verificar atualizações.\n{str(e)}")
+        finally:
+            self.btn_update.setText(f"Verificar Atualizações (Atual: {CURRENT_VERSION})")
+            self.btn_update.setEnabled(True)
+
+    def perform_update(self, release_data):
+        appimage_url = None
+        for asset in release_data.get("assets", []):
+            if asset.get("name", "").endswith(".AppImage"):
+                appimage_url = asset.get("browser_download_url")
+                break
+                
+        if not appimage_url:
+            QMessageBox.warning(self, "Erro", "Arquivo .AppImage não encontrado no lançamento do GitHub.")
+            return
+            
+        current_appimage = os.environ.get("APPIMAGE")
+        if not current_appimage:
+            QMessageBox.information(self, "Aviso", "O programa não está rodando como um AppImage isolado.\n(Para atualizar, você precisa rodar a versão compilada).")
+            return
+            
+        try:
+            self.btn_update.setText("Baixando atualização... Aguarde!")
+            QApplication.processEvents()
+            
+            req = urllib.request.Request(appimage_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req) as response:
+                with open(current_appimage, 'wb') as f:
+                    shutil.copyfileobj(response, f)
+            
+            os.chmod(current_appimage, 0o755)
+            
+            QMessageBox.information(self, "Sucesso!", "Atualização concluída com sucesso!\nO aplicativo será reiniciado.")
+            
+            os.execv(current_appimage, [current_appimage] + sys.argv[1:])
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Erro fatal", f"Falha ao tentar baixar/aplicar a atualização:\n{str(e)}")
+            self.btn_update.setText(f"Verificar Atualizações (Atual: {CURRENT_VERSION})")
+            
     def load_printers(self):
         printers = ["Salvar como PDF"]
         try:
