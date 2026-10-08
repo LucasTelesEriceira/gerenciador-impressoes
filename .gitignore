@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+build/
+dist/
+AppDir/
+Gerenciador_Impressoes_Pro.AppImage
+*.spec
