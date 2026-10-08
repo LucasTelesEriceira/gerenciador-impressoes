@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QMainWindow, QVBoxLayout, QH
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QProcess
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QPalette
 
-CURRENT_VERSION = "v1.0.0"
+CURRENT_VERSION = "v1.1.0"
 SETTINGS_DIR = os.path.expanduser("~/.config/gerenciador_impressoes_pro")
 SETTINGS_FILE = os.path.join(SETTINGS_DIR, "settings.json")
 HISTORY_FILE = os.path.join(SETTINGS_DIR, "history.json")
