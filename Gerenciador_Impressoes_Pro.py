@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QMainWindow, QVBoxLayout, QH
                              QMenuBar, QMenu, QAction, QDialog, QTableWidget, QTableWidgetItem,
                              QHeaderView, QTextEdit, QCheckBox, QDialogButtonBox)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QProcess
-from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QPalette
+from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QPalette, QIcon
 
 CURRENT_VERSION = "v1.1.0"
 SETTINGS_DIR = os.path.expanduser("~/.config/gerenciador_impressoes_pro")
@@ -1370,6 +1370,10 @@ class PrintManagerApp(QMainWindow):
 
     def initUI(self):
         self.setWindowTitle("Gerenciador Avançado de Impressão (Nativo + QThread)")
+        base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        icon_path = os.path.join(base_dir, "icon.png")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         self.resize(1050, 740)
         self.setAcceptDrops(True)
 
