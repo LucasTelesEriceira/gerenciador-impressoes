@@ -12,9 +12,10 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QMainWindow, QVBoxLayout, QH
                              QFileDialog, QMessageBox, QGroupBox, QFormLayout,
                              QScrollArea, QSplitter, QProgressBar, QFrame, QShortcut,
                              QMenuBar, QMenu, QAction, QDialog, QTableWidget, QTableWidgetItem,
-                             QHeaderView, QTextEdit, QCheckBox, QDialogButtonBox)
+                             QHeaderView, QTextEdit, QCheckBox, QDialogButtonBox, QTabWidget)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QProcess
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QPalette, QIcon
+from PyQt5.QtPrintSupport import QPrinterInfo
 
 CURRENT_VERSION = "v1.1.0"
 SETTINGS_DIR = os.path.expanduser("~/.config/gerenciador_impressoes_pro")
@@ -132,6 +133,15 @@ def get_system_printers(cups_server="", cups_port=631):
                         printers.append(name)
             if printers:
                 break
+        except Exception:
+            pass
+
+    # 3. Fallback nativo do sistema operacional (Windows / Qt / cups-browsed)
+    if not printers:
+        try:
+            for p in QPrinterInfo.availablePrinterNames():
+                if p and p not in printers:
+                    printers.append(p)
         except Exception:
             pass
 
@@ -804,43 +814,52 @@ class PrintWorkerThread(QThread):
                     self.finished_signal.emit(False, "Caminho de salvamento não especificado.")
             else:
                 self.progress.emit(f"Enviando trabalho para a impressora {self.printer}...")
-                lp_args = ["lp"]
-                if self.cups_server:
-                    lp_args.extend(["-h", self.cups_server])
-                lp_args.extend(["-d", self.printer])
-
-                if "Borda Maior" in self.duplex:
-                    lp_args.extend(["-o", "sides=two-sided-long-edge"])
-                elif "Borda Menor" in self.duplex:
-                    lp_args.extend(["-o", "sides=two-sided-short-edge"])
+                if sys.platform == "win32":
+                    try:
+                        # Envio nativo no Windows usando comando do sistema
+                        ps_cmd = f'Start-Process -FilePath "{current_file}" -Verb PrintTo -ArgumentList "\"{self.printer}\"" -PassThru | Wait-Process'
+                        subprocess.check_call(["powershell", "-NoProfile", "-Command", ps_cmd])
+                        self.finished_signal.emit(True, f"Enviado com sucesso para a impressora '{self.printer}'!")
+                    except Exception as win_err:
+                        self.finished_signal.emit(False, f"Falha ao enviar impressão no Windows:\n{str(win_err)}")
                 else:
-                    lp_args.extend(["-o", "sides=one-sided"])
+                    lp_args = ["lp"]
+                    if self.cups_server:
+                        lp_args.extend(["-h", self.cups_server])
+                    lp_args.extend(["-d", self.printer])
 
-                if "Preto" in self.color:
-                    lp_args.extend(["-o", "print-color-mode=monochrome", "-o", "ColorModel=Gray"])
-                else:
-                    lp_args.extend(["-o", "print-color-mode=color"])
-
-                if self.tray and self.tray != "Automática (Padrão)" and self.tray != "Auto":
-                    if "Bandeja 1" in self.tray or self.tray in ["Tray1", "tray-1", "TRAY1"]:
-                        lp_args.extend(["-o", f"InputSlot={self.tray}", "-o", "media-source=tray-1"])
-                    elif "Bandeja 2" in self.tray or self.tray in ["Tray2", "tray-2", "TRAY2"]:
-                        lp_args.extend(["-o", f"InputSlot={self.tray}", "-o", "media-source=tray-2"])
-                    elif "Bandeja 3" in self.tray or self.tray in ["Tray3", "tray-3", "TRAY3"]:
-                        lp_args.extend(["-o", f"InputSlot={self.tray}", "-o", "media-source=tray-3"])
-                    elif "Manual" in self.tray or self.tray in ["Manual", "MANUAL", "manual"]:
-                        lp_args.extend(["-o", f"InputSlot={self.tray}", "-o", "media-source=manual"])
-                    elif "Envelope" in self.tray or self.tray in ["Envelope", "ENVELOPE", "envelope"]:
-                        lp_args.extend(["-o", f"InputSlot={self.tray}", "-o", "media-source=envelope"])
+                    if "Borda Maior" in self.duplex:
+                        lp_args.extend(["-o", "sides=two-sided-long-edge"])
+                    elif "Borda Menor" in self.duplex:
+                        lp_args.extend(["-o", "sides=two-sided-short-edge"])
                     else:
-                        lp_args.extend(["-o", f"InputSlot={self.tray}", "-o", f"media-source={self.tray}"])
+                        lp_args.extend(["-o", "sides=one-sided"])
 
-                media_map = {"A4": "A4", "Carta (Letter)": "Letter", "A3": "A3", "A5": "A5", "Ofício (Legal)": "Legal"}
-                media_name = media_map.get(self.paper_size, "A4")
-                lp_args.extend(["-o", f"media={media_name}"])
-                lp_args.append(current_file)
-                subprocess.check_call(lp_args)
-                self.finished_signal.emit(True, f"Enviado com sucesso para a impressora '{self.printer}'!")
+                    if "Preto" in self.color:
+                        lp_args.extend(["-o", "print-color-mode=monochrome", "-o", "ColorModel=Gray"])
+                    else:
+                        lp_args.extend(["-o", "print-color-mode=color"])
+
+                    if self.tray and self.tray != "Automática (Padrão)" and self.tray != "Auto":
+                        if "Bandeja 1" in self.tray or self.tray in ["Tray1", "tray-1", "TRAY1"]:
+                            lp_args.extend(["-o", f"InputSlot={self.tray}", "-o", "media-source=tray-1"])
+                        elif "Bandeja 2" in self.tray or self.tray in ["Tray2", "tray-2", "TRAY2"]:
+                            lp_args.extend(["-o", f"InputSlot={self.tray}", "-o", "media-source=tray-2"])
+                        elif "Bandeja 3" in self.tray or self.tray in ["Tray3", "tray-3", "TRAY3"]:
+                            lp_args.extend(["-o", f"InputSlot={self.tray}", "-o", "media-source=tray-3"])
+                        elif "Manual" in self.tray or self.tray in ["Manual", "MANUAL", "manual"]:
+                            lp_args.extend(["-o", f"InputSlot={self.tray}", "-o", "media-source=manual"])
+                        elif "Envelope" in self.tray or self.tray in ["Envelope", "ENVELOPE", "envelope"]:
+                            lp_args.extend(["-o", f"InputSlot={self.tray}", "-o", "media-source=envelope"])
+                        else:
+                            lp_args.extend(["-o", f"InputSlot={self.tray}", "-o", f"media-source={self.tray}"])
+
+                    media_map = {"A4": "A4", "Carta (Letter)": "Letter", "A3": "A3", "A5": "A5", "Ofício (Legal)": "Legal"}
+                    media_name = media_map.get(self.paper_size, "A4")
+                    lp_args.extend(["-o", f"media={media_name}"])
+                    lp_args.append(current_file)
+                    subprocess.check_call(lp_args)
+                    self.finished_signal.emit(True, f"Enviado com sucesso para a impressora '{self.printer}'!")
 
         except Exception as e:
             self.finished_signal.emit(False, f"Ocorreu um erro no processamento:\n{str(e)}")
@@ -1080,46 +1099,183 @@ class SettingsDialog(QDialog):
 
 
 class PrinterInstallerDialog(QDialog):
-    def __init__(self, settings, parent=None):
+    def __init__(self, main_app, parent=None):
         super().__init__(parent)
-        self.settings = settings
-        self.setWindowTitle("Assistente de Instalação de Impressoras (GitHub)")
-        self.resize(680, 480)
+        self.main_app = main_app
+        if hasattr(main_app, "settings"):
+            self.settings = main_app.settings
+        else:
+            self.settings = main_app if isinstance(main_app, dict) else load_settings()
+
+        self.setWindowTitle("Assistente de Configuração de Impressoras e Servidor CUPS")
+        self.resize(700, 520)
         self.process = None
 
-        layout = QVBoxLayout()
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(14, 14, 14, 14)
+        main_layout.setSpacing(10)
 
-        info_label = QLabel("Esta ferramenta permite baixar e executar o script de instalação de drivers e impressoras do GitHub.")
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
+        tabs = QTabWidget()
 
-        form = QFormLayout()
-        self.txt_url = QLineEdit(self.settings.get("script_url", "https://raw.githubusercontent.com/LucasTelesEriceira/gerenciador-impressoes/main/instalar_impressoras.sh"))
-        form.addRow("URL do Script (Bash):", self.txt_url)
-        layout.addLayout(form)
+        # =========================================================================
+        # ABA 1: Servidor CUPS na Rede (Recomendado / Multiplataforma / Sem Root)
+        # =========================================================================
+        tab_server = QWidget()
+        layout_server = QVBoxLayout(tab_server)
+        layout_server.setSpacing(10)
 
-        self.btn_run = QPushButton("🚀 Baixar e Executar Instalação")
-        self.btn_run.setStyleSheet("background-color: #2563EB; color: white; font-weight: bold; padding: 8px; border-radius: 4px;")
-        self.btn_run.clicked.connect(self.run_installation)
-        layout.addWidget(self.btn_run)
+        server_info = QLabel(
+            "<b>Conectar a um Servidor de Impressão na Rede (Recomendado):</b><br>"
+            "Permite acessar impressoras compartilhadas em um servidor central (escola, empresa ou escritório). "
+            "Todas as impressoras do servidor ficam disponíveis instantaneamente, <b>sem precisar instalar drivers locais</b> "
+            "e <b>sem necessidade de senha de administrador (root)</b>."
+        )
+        server_info.setWordWrap(True)
+        server_info.setStyleSheet("color: #E2E8F0; background-color: #1E293B; padding: 10px; border-radius: 6px;")
+        layout_server.addWidget(server_info)
 
-        self.log_console = QTextEdit()
-        self.log_console.setReadOnly(True)
-        self.log_console.setStyleSheet("background-color: #1E293B; color: #38BDF8; font-family: monospace; font-size: 11px;")
-        layout.addWidget(self.log_console)
+        form_server = QFormLayout()
+        form_server.setVerticalSpacing(8)
+
+        self.txt_server_ip = QLineEdit(self.settings.get("cups_server", ""))
+        self.txt_server_ip.setPlaceholderText("Ex: 192.168.1.28 ou servidor.local")
+        form_server.addRow("Endereço do Servidor (IP/Host):", self.txt_server_ip)
+
+        self.sp_server_port = QSpinBox()
+        self.sp_server_port.setRange(1, 65535)
+        self.sp_server_port.setValue(int(self.settings.get("cups_port", 631)))
+        form_server.addRow("Porta do Servidor CUPS:", self.sp_server_port)
+
+        layout_server.addLayout(form_server)
+
+        btns_server = QHBoxLayout()
+        self.btn_test_connect = QPushButton("🔍 Testar e Conectar ao Servidor")
+        self.btn_test_connect.setStyleSheet("background-color: #2563EB; color: white; font-weight: bold; padding: 8px 14px; border-radius: 4px;")
+        self.btn_test_connect.clicked.connect(self.test_and_connect_server)
+        btns_server.addWidget(self.btn_test_connect)
+
+        self.btn_use_local = QPushButton("💻 Usar Sistema Local (Desconectar)")
+        self.btn_use_local.clicked.connect(self.use_local_cups)
+        btns_server.addWidget(self.btn_use_local)
+        layout_server.addLayout(btns_server)
+
+        self.txt_server_status = QTextEdit()
+        self.txt_server_status.setReadOnly(True)
+        self.txt_server_status.setStyleSheet("background-color: #0F172A; color: #38BDF8; font-family: monospace; font-size: 11px; border-radius: 4px;")
+        self.txt_server_status.setPlaceholderText("O resultado do teste de conexão e lista de impressoras detectadas aparecerá aqui...")
+        layout_server.addWidget(self.txt_server_status)
+
+        tabs.addTab(tab_server, "🌐 Servidor na Rede (CUPS)")
+
+        # =========================================================================
+        # ABA 2: Instalação Local via Script (Avançado / Linux)
+        # =========================================================================
+        tab_script = QWidget()
+        layout_script = QVBoxLayout(tab_script)
+        layout_script.setSpacing(10)
+
+        if sys.platform.startswith("linux"):
+            script_info = QLabel(
+                "<b>Instalação Automatizada Local (Apenas Linux):</b><br>"
+                "Baixa e executa um script shell (.sh) para compilar e instalar drivers locais na máquina via root (pkexec). "
+                "Recomendado para administradores preparando uma nova máquina servidora ou computadores isolados."
+            )
+            script_info.setWordWrap(True)
+            layout_script.addWidget(script_info)
+
+            form_script = QFormLayout()
+            self.txt_url = QLineEdit(self.settings.get("script_url", "https://raw.githubusercontent.com/LucasTelesEriceira/gerenciador-impressoes/main/instalar_impressoras.sh"))
+            form_script.addRow("URL do Script (Bash):", self.txt_url)
+            layout_script.addLayout(form_script)
+
+            self.btn_run = QPushButton("🚀 Baixar e Executar Instalação")
+            self.btn_run.setStyleSheet("background-color: #10B981; color: white; font-weight: bold; padding: 8px; border-radius: 4px;")
+            self.btn_run.clicked.connect(self.run_installation)
+            layout_script.addWidget(self.btn_run)
+
+            self.log_console = QTextEdit()
+            self.log_console.setReadOnly(True)
+            self.log_console.setStyleSheet("background-color: #0F172A; color: #38BDF8; font-family: monospace; font-size: 11px; border-radius: 4px;")
+            layout_script.addWidget(self.log_console)
+        else:
+            win_notice = QLabel(
+                "<h3>ℹ️ Instalação Local no Windows</h3>"
+                "<p>A execução de scripts Bash (.sh) com <code>pkexec</code> é exclusiva para distribuições Linux.</p>"
+                "<p>No Windows, você pode:</p>"
+                "<ul>"
+                "  <li>Adicionar impressoras normalmente pelo <b>Painel de Configurações do Windows</b>.</li>"
+                "  <li>Ou usar a aba <b>'Servidor na Rede (CUPS)'</b> para imprimir diretamente pelo servidor Linux da escola.</li>"
+                "</ul>"
+            )
+            win_notice.setWordWrap(True)
+            layout_script.addWidget(win_notice)
+            layout_script.addStretch()
+
+        tabs.addTab(tab_script, "⚙️ Script Avançado (Linux)")
+
+        main_layout.addWidget(tabs)
 
         btn_close = QPushButton("Fechar")
-        btn_close.clicked.connect(self.reject)
-        layout.addWidget(btn_close)
+        btn_close.clicked.connect(self.accept)
+        main_layout.addWidget(btn_close)
 
-        self.setLayout(layout)
+        self.setLayout(main_layout)
+
+    def test_and_connect_server(self):
+        server = self.txt_server_ip.text().strip()
+        port = self.sp_server_port.value()
+        if not server:
+            QMessageBox.warning(self, "Aviso", "Por favor, digite o endereço IP ou nome do servidor CUPS.")
+            return
+
+        self.txt_server_status.clear()
+        self.txt_server_status.append(f"[*] Testando comunicação com {server}:{port}...")
+        QApplication.processEvents()
+
+        printers = get_system_printers(server, port)
+        if printers:
+            self.txt_server_status.append(f"\n[✓] Conexão bem-sucedida! {len(printers)} impressora(s) encontrada(s):")
+            for p in printers:
+                self.txt_server_status.append(f"   🖨️  {p}")
+
+            self.settings["cups_server"] = server
+            self.settings["cups_port"] = port
+            save_settings(self.settings)
+
+            if hasattr(self.main_app, "settings"):
+                self.main_app.settings = self.settings
+                if hasattr(self.main_app, "apply_cups_environment"):
+                    self.main_app.apply_cups_environment()
+                if hasattr(self.main_app, "load_printers"):
+                    self.main_app.load_printers()
+
+            self.txt_server_status.append("\n[✓] Servidor salvo! As impressoras já estão carregadas na tela principal.")
+            QMessageBox.information(self, "Sucesso", f"Servidor CUPS conectado com sucesso!\n{len(printers)} impressora(s) disponível(is).")
+        else:
+            self.txt_server_status.append(f"\n[X] Falha ao comunicar com o servidor '{server}:{port}'.")
+            self.txt_server_status.append("Verifique se o IP está correto e se o servidor CUPS aceita conexões de rede.")
+            QMessageBox.warning(self, "Falha de Conexão", f"Não foi possível obter a lista de impressoras de '{server}:{port}'.\nVerifique se o servidor está ativo.")
+
+    def use_local_cups(self):
+        self.txt_server_ip.clear()
+        self.settings["cups_server"] = ""
+        save_settings(self.settings)
+        if hasattr(self.main_app, "settings"):
+            self.main_app.settings = self.settings
+            if hasattr(self.main_app, "apply_cups_environment"):
+                self.main_app.apply_cups_environment()
+            if hasattr(self.main_app, "load_printers"):
+                self.main_app.load_printers()
+        self.txt_server_status.clear()
+        self.txt_server_status.append("[✓] Configuração alterada para impressoras locais.")
+        QMessageBox.information(self, "Sistema Local", "O aplicativo agora está utilizando as impressoras do sistema local.")
 
     def run_installation(self):
+        if not sys.platform.startswith("linux"):
+            return
         url = self.txt_url.text().strip()
         if not url:
-            QMessageBox.warning(self, "Aviso", "Informe a URL do script do GitHub.")
+            QMessageBox.warning(self, "Aviso", "Informe a URL do script.")
             return
 
         self.log_console.clear()
@@ -1137,17 +1293,21 @@ class PrinterInstallerDialog(QDialog):
         self.process.start("bash", ["-c", cmd])
 
     def on_stdout(self):
-        data = self.process.readAllStandardOutput().data().decode('utf-8', errors='replace')
-        self.log_console.append(data)
+        if self.process:
+            data = self.process.readAllStandardOutput().data().decode('utf-8', errors='replace')
+            self.log_console.append(data)
 
     def on_stderr(self):
-        data = self.process.readAllStandardError().data().decode('utf-8', errors='replace')
-        self.log_console.append(data)
+        if self.process:
+            data = self.process.readAllStandardError().data().decode('utf-8', errors='replace')
+            self.log_console.append(data)
 
     def on_finished(self, exit_code, exit_status):
         self.btn_run.setEnabled(True)
         if exit_code == 0:
             self.log_console.append("\n[✓] Processo concluído com sucesso!")
+            if hasattr(self.main_app, "load_printers"):
+                self.main_app.load_printers()
         else:
             self.log_console.append(f"\n[X] Processo finalizado com código de saída {exit_code}.")
 
@@ -1651,7 +1811,7 @@ class PrintManagerApp(QMainWindow):
         act_queue.triggered.connect(self.open_queue_dialog)
         menu_tools.addAction(act_queue)
 
-        act_installer = QAction("Instalar Impressoras (&Script GitHub)...", self)
+        act_installer = QAction("Configurar &Impressoras / Servidor...", self)
         act_installer.triggered.connect(self.open_installer_dialog)
         menu_tools.addAction(act_installer)
 
@@ -2084,7 +2244,7 @@ class PrintManagerApp(QMainWindow):
         dlg.exec_()
 
     def open_installer_dialog(self):
-        dlg = PrinterInstallerDialog(self.settings, parent=self)
+        dlg = PrinterInstallerDialog(self, parent=self)
         dlg.exec_()
 
     def open_queue_dialog(self):

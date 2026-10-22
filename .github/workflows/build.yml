@@ -1,0 +1,157 @@
+name: Build e Release Multiplataforma
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # =========================================================================
+  # 1. BUILD WINDOWS (.exe)
+  # =========================================================================
+  build-windows:
+    name: Compilar para Windows (.exe)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout do Repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Instalar Dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install pypdf pdftools.pdfposter PyQt5 pyinstaller pillow
+
+      - name: Gerar Ícone .ico para Windows
+        run: |
+          python -c "from PIL import Image; img = Image.open('icon.png'); img.save('icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])"
+
+      - name: Compilar Executável Único com PyInstaller
+        run: |
+          pyinstaller --noconfirm --onefile --windowed `
+            --name "Gerenciador_Impressoes_Pro" `
+            --icon "icon.ico" `
+            --add-data "icon.png;." `
+            --hidden-import pdftools.pdfposter.cmd `
+            --hidden-import pypdf `
+            Gerenciador_Impressoes_Pro.py
+
+      - name: Salvar Artefato do Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gerenciador_Impressoes_Pro-Windows
+          path: dist/Gerenciador_Impressoes_Pro.exe
+
+  # =========================================================================
+  # 2. BUILD LINUX (.AppImage)
+  # =========================================================================
+  build-linux:
+    name: Compilar para Linux (.AppImage)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout do Repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Instalar Dependências do Sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-glx libegl1-mesa libxkbcommon-x11-0 wget file libfuse2
+
+      - name: Instalar Dependências Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install pypdf pdftools.pdfposter PyQt5 pyinstaller
+
+      - name: Compilar Binário com PyInstaller
+        run: |
+          pyinstaller --noconfirm --onedir --windowed \
+            --name "Gerenciador_Impressoes_Pro" \
+            --add-data "icon.png:." \
+            --hidden-import pdftools.pdfposter.cmd \
+            --hidden-import pypdf \
+            Gerenciador_Impressoes_Pro.py
+
+      - name: Gerar Pacote AppImage
+        run: |
+          mkdir -p AppDir/usr/bin
+          cp -r dist/Gerenciador_Impressoes_Pro/* AppDir/usr/bin/
+          cp icon.png AppDir/icon.png
+          cp icon.png AppDir/.DirIcon
+          
+          # Criar arquivo .desktop
+          cat << 'EOF' > AppDir/gerenciador-impressoes.desktop
+          [Desktop Entry]
+          Name=Gerenciador de Impressões Pro
+          Exec=Gerenciador_Impressoes_Pro
+          Icon=icon
+          Type=Application
+          Categories=Utility;
+          EOF
+
+          # Criar script de inicialização AppRun
+          cat << 'EOF' > AppDir/AppRun
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          exec "${HERE}/usr/bin/Gerenciador_Impressoes_Pro" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+          
+          # Baixar e preparar appimagetool
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+          ./appimagetool --appimage-extract
+          
+          # Construir o AppImage oficial
+          ARCH=x86_64 squashfs-root/AppRun AppDir Gerenciador_Impressoes_Pro-x86_64.AppImage
+
+      - name: Salvar Artefato do Linux
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gerenciador_Impressoes_Pro-Linux
+          path: Gerenciador_Impressoes_Pro-x86_64.AppImage
+
+  # =========================================================================
+  # 3. PUBLICAR RELEASE (Quando criar uma Tag, ex: v1.1.0)
+  # =========================================================================
+  release:
+    name: Publicar Release no GitHub
+    needs: [build-windows, build-linux]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar Artefatos do Windows
+        uses: actions/download-artifact@v4
+        with:
+          name: Gerenciador_Impressoes_Pro-Windows
+          path: release/
+
+      - name: Baixar Artefatos do Linux
+        uses: actions/download-artifact@v4
+        with:
+          name: Gerenciador_Impressoes_Pro-Linux
+          path: release/
+
+      - name: Publicar Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/Gerenciador_Impressoes_Pro.exe
+            release/Gerenciador_Impressoes_Pro-x86_64.AppImage
+          generate_release_notes: true
