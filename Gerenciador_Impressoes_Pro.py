@@ -1036,51 +1036,142 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.main_app = main_app
         self.setWindowTitle("Configurações e Preferências")
-        self.resize(520, 360)
+        self.resize(540, 420)
 
         self.settings = load_settings()
 
-        layout = QVBoxLayout()
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
-        form = QFormLayout()
-        form.setVerticalSpacing(8)
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(14, 14, 14, 14)
+        main_layout.setSpacing(12)
+
+        # ---------------------------------------------------------------------
+        # SEÇÃO 1: Conexão com Servidor de Impressão CUPS (Rede Local)
+        # ---------------------------------------------------------------------
+        group_server = QGroupBox("Servidor de Impressão CUPS (Rede Local)")
+        layout_server = QVBoxLayout(group_server)
+        layout_server.setSpacing(10)
+
+        # Badge visual de status da conexão
+        self.lbl_server_status = QLabel()
+        self.lbl_server_status.setWordWrap(True)
+        layout_server.addWidget(self.lbl_server_status)
+
+        form_server = QFormLayout()
+        form_server.setVerticalSpacing(8)
 
         self.txt_cups_server = QLineEdit(self.settings.get("cups_server", ""))
-        self.txt_cups_server.setPlaceholderText("Ex: localhost ou 192.168.1.100 (vazio = padrão)")
-        form.addRow("Servidor CUPS (IP/Host):", self.txt_cups_server)
+        self.txt_cups_server.setPlaceholderText("Ex: 192.168.1.28 ou servidor.local (deixe vazio para usar modo local)")
+        self.txt_cups_server.textChanged.connect(self.on_server_text_changed)
+        form_server.addRow("Endereço do Servidor (IP/Host):", self.txt_cups_server)
 
         self.sp_cups_port = QSpinBox()
         self.sp_cups_port.setRange(1, 65535)
         self.sp_cups_port.setValue(int(self.settings.get("cups_port", 631)))
-        form.addRow("Porta CUPS:", self.sp_cups_port)
+        form_server.addRow("Porta do Servidor:", self.sp_cups_port)
+
+        layout_server.addLayout(form_server)
+
+        btns_conn_layout = QHBoxLayout()
+        self.btn_test = QPushButton("🔍 Testar Conexão")
+        self.btn_test.clicked.connect(lambda: self.test_connection(silent=False))
+        btns_conn_layout.addWidget(self.btn_test)
+
+        self.btn_use_local = QPushButton("💻 Usar Impressoras Locais")
+        self.btn_use_local.clicked.connect(self.use_local_printers)
+        btns_conn_layout.addWidget(self.btn_use_local)
+
+        layout_server.addLayout(btns_conn_layout)
+        main_layout.addWidget(group_server)
+
+        # ---------------------------------------------------------------------
+        # SEÇÃO 2: Preferências Gerais de Impressão
+        # ---------------------------------------------------------------------
+        group_general = QGroupBox("Preferências Gerais")
+        layout_general = QFormLayout(group_general)
+        layout_general.setVerticalSpacing(8)
 
         self.cb_default_paper = QComboBox()
         self.cb_default_paper.addItems(["A4", "Carta (Letter)", "A3", "A5", "Ofício (Legal)"])
         self.cb_default_paper.setCurrentText(self.settings.get("default_paper", "A4"))
-        form.addRow("Tamanho de Papel Padrão:", self.cb_default_paper)
+        layout_general.addRow("Tamanho de Papel Padrão:", self.cb_default_paper)
 
         self.chk_keep_history = QCheckBox("Salvar histórico de arquivos impressos")
         self.chk_keep_history.setChecked(self.settings.get("keep_history", True))
-        form.addRow("Histórico:", self.chk_keep_history)
+        layout_general.addRow("Histórico:", self.chk_keep_history)
 
         self.sp_max_history = QSpinBox()
         self.sp_max_history.setRange(10, 1000)
         self.sp_max_history.setValue(int(self.settings.get("max_history_entries", 100)))
-        form.addRow("Máx. Registros do Histórico:", self.sp_max_history)
+        layout_general.addRow("Máx. Registros do Histórico:", self.sp_max_history)
 
-        self.txt_script_url = QLineEdit(self.settings.get("script_url", ""))
-        self.txt_script_url.setPlaceholderText("URL do script .sh no GitHub")
-        form.addRow("URL Script Impressoras (GitHub):", self.txt_script_url)
+        main_layout.addWidget(group_general)
 
-        layout.addLayout(form)
-
+        # ---------------------------------------------------------------------
+        # Botões Salvar / Cancelar
+        # ---------------------------------------------------------------------
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.save_and_close)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        main_layout.addWidget(buttons)
 
-        self.setLayout(layout)
+        self.setLayout(main_layout)
+
+        # Checa status inicial da conexão
+        self.refresh_initial_status()
+
+    def set_status_badge(self, text, status_type):
+        """Atualiza o badge de status com estilo consistente com o tema do sistema."""
+        if status_type == "connected":
+            self.lbl_server_status.setText(f"🟢 <b>Status: Conectado</b> — {text}")
+            self.lbl_server_status.setStyleSheet("border: 1px solid #10B981; color: #10B981; padding: 8px; border-radius: 6px;")
+        elif status_type == "error":
+            self.lbl_server_status.setText(f"🔴 <b>Status: Inacessível</b> — {text}")
+            self.lbl_server_status.setStyleSheet("border: 1px solid #EF4444; color: #EF4444; padding: 8px; border-radius: 6px;")
+        else:
+            self.lbl_server_status.setText(f"⚪ <b>Status: Modo Local</b> — {text}")
+            self.lbl_server_status.setStyleSheet("border: 1px solid #94A3B8; color: #94A3B8; padding: 8px; border-radius: 6px;")
+
+    def on_server_text_changed(self):
+        current = self.txt_cups_server.text().strip()
+        if not current:
+            self.set_status_badge("Utilizando impressoras locais deste computador.", "local")
+
+    def refresh_initial_status(self):
+        server = self.txt_cups_server.text().strip()
+        if not server:
+            self.set_status_badge("Utilizando impressoras locais deste computador.", "local")
+        else:
+            self.test_connection(silent=True)
+
+    def test_connection(self, silent=False):
+        server = self.txt_cups_server.text().strip()
+        port = self.sp_cups_port.value()
+        if not server:
+            self.set_status_badge("Nenhum servidor configurado. Utilizando impressoras locais.", "local")
+            if not silent:
+                QMessageBox.information(self, "Modo Local", "Nenhum endereço informado. O aplicativo está utilizando as impressoras locais.")
+            return
+
+        self.set_status_badge(f"Verificando comunicação com {server}:{port}...", "local")
+        QApplication.processEvents()
+
+        printers = get_system_printers(server, port)
+        if printers:
+            msg = f"{server}:{port} ({len(printers)} impressora(s) disponível(is))"
+            self.set_status_badge(msg, "connected")
+            if not silent:
+                printers_str = "\n".join([f"• {p}" for p in printers])
+                QMessageBox.information(self, "Conexão Bem-Sucedida", f"Conectado ao servidor CUPS em {server}:{port}!\n\nImpressoras encontradas:\n{printers_str}")
+        else:
+            msg = f"Não foi possível responder em {server}:{port}. Verifique o IP e a rede."
+            self.set_status_badge(msg, "error")
+            if not silent:
+                QMessageBox.warning(self, "Falha de Conexão", f"Não foi possível obter resposta de '{server}:{port}'.\n\nVerifique se o servidor está ligado, na mesma rede e aceitando conexões.")
+
+    def use_local_printers(self):
+        self.txt_cups_server.clear()
+        self.set_status_badge("Utilizando impressoras locais deste computador.", "local")
+        QMessageBox.information(self, "Modo Local", "Campo do servidor limpo. Ao salvar, o aplicativo voltará a utilizar as impressoras locais.")
 
     def save_and_close(self):
         self.settings["cups_server"] = self.txt_cups_server.text().strip()
@@ -1088,7 +1179,6 @@ class SettingsDialog(QDialog):
         self.settings["default_paper"] = self.cb_default_paper.currentText()
         self.settings["keep_history"] = self.chk_keep_history.isChecked()
         self.settings["max_history_entries"] = self.sp_max_history.value()
-        self.settings["script_url"] = self.txt_script_url.text().strip()
 
         save_settings(self.settings)
         self.main_app.settings = self.settings
@@ -1098,7 +1188,7 @@ class SettingsDialog(QDialog):
         QMessageBox.information(self, "Sucesso", "Configurações salvas com sucesso!")
 
 
-class PrinterInstallerDialog(QDialog):
+class ServerManagerDialog(QDialog):
     def __init__(self, main_app, parent=None):
         super().__init__(parent)
         self.main_app = main_app
@@ -1107,8 +1197,8 @@ class PrinterInstallerDialog(QDialog):
         else:
             self.settings = main_app if isinstance(main_app, dict) else load_settings()
 
-        self.setWindowTitle("Assistente de Configuração de Impressoras e Servidor CUPS")
-        self.resize(700, 520)
+        self.setWindowTitle("Central do Servidor CUPS e Instalador de Drivers")
+        self.resize(720, 560)
         self.process = None
 
         main_layout = QVBoxLayout()
@@ -1118,57 +1208,76 @@ class PrinterInstallerDialog(QDialog):
         tabs = QTabWidget()
 
         # =========================================================================
-        # ABA 1: Servidor CUPS na Rede (Recomendado / Multiplataforma / Sem Root)
+        # ABA 1: Servidor CUPS Local (Administração da Máquina Servidora)
         # =========================================================================
         tab_server = QWidget()
         layout_server = QVBoxLayout(tab_server)
         layout_server.setSpacing(10)
 
         server_info = QLabel(
-            "<b>Conectar a um Servidor de Impressão na Rede (Recomendado):</b><br>"
-            "Permite acessar impressoras compartilhadas em um servidor central (escola, empresa ou escritório). "
-            "Todas as impressoras do servidor ficam disponíveis instantaneamente, <b>sem precisar instalar drivers locais</b> "
-            "e <b>sem necessidade de senha de administrador (root)</b>."
+            "<b>Painel de Administração do Servidor de Impressão CUPS:</b><br>"
+            "Utilize esta ferramenta no computador que atua (ou atuará) como <b>Servidor Central de Impressão</b> da escola ou escritório. "
+            "Aqui você ativa o compartilhamento na rede local e verifica o estado dos daemons CUPS e Avahi."
         )
         server_info.setWordWrap(True)
-        server_info.setStyleSheet("color: #E2E8F0; background-color: #1E293B; padding: 10px; border-radius: 6px;")
+        server_info.setStyleSheet("border: 1px solid #94A3B8; padding: 10px; border-radius: 6px;")
         layout_server.addWidget(server_info)
 
-        form_server = QFormLayout()
-        form_server.setVerticalSpacing(8)
+        # Grupo de Status dos Daemons
+        group_status = QGroupBox("Estado dos Serviços e Compartilhamento de Rede")
+        form_status = QFormLayout(group_status)
+        form_status.setVerticalSpacing(8)
 
-        self.txt_server_ip = QLineEdit(self.settings.get("cups_server", ""))
-        self.txt_server_ip.setPlaceholderText("Ex: 192.168.1.28 ou servidor.local")
-        form_server.addRow("Endereço do Servidor (IP/Host):", self.txt_server_ip)
+        self.lbl_cups_service = QLabel("Consultando...")
+        self.lbl_avahi_service = QLabel("Consultando...")
+        self.lbl_sharing_status = QLabel("Consultando...")
 
-        self.sp_server_port = QSpinBox()
-        self.sp_server_port.setRange(1, 65535)
-        self.sp_server_port.setValue(int(self.settings.get("cups_port", 631)))
-        form_server.addRow("Porta do Servidor CUPS:", self.sp_server_port)
+        form_status.addRow("Serviço CUPS (cups.service):", self.lbl_cups_service)
+        form_status.addRow("Descoberta de Rede (avahi-daemon):", self.lbl_avahi_service)
+        form_status.addRow("Compartilhamento na Rede:", self.lbl_sharing_status)
 
-        layout_server.addLayout(form_server)
+        self.btn_refresh_status = QPushButton("🔄 Atualizar Status")
+        self.btn_refresh_status.clicked.connect(self.check_local_server_status)
+        form_status.addRow("", self.btn_refresh_status)
 
-        btns_server = QHBoxLayout()
-        self.btn_test_connect = QPushButton("🔍 Testar e Conectar ao Servidor")
-        self.btn_test_connect.setStyleSheet("background-color: #2563EB; color: white; font-weight: bold; padding: 8px 14px; border-radius: 4px;")
-        self.btn_test_connect.clicked.connect(self.test_and_connect_server)
-        btns_server.addWidget(self.btn_test_connect)
+        layout_server.addWidget(group_status)
 
-        self.btn_use_local = QPushButton("💻 Usar Sistema Local (Desconectar)")
-        self.btn_use_local.clicked.connect(self.use_local_cups)
-        btns_server.addWidget(self.btn_use_local)
-        layout_server.addLayout(btns_server)
+        # Grupo de Ações Administrativas
+        group_actions = QGroupBox("Ações Administrativas (Requer senha de Administrador)")
+        layout_actions = QVBoxLayout(group_actions)
+        layout_actions.setSpacing(8)
 
-        self.txt_server_status = QTextEdit()
-        self.txt_server_status.setReadOnly(True)
-        self.txt_server_status.setStyleSheet("background-color: #0F172A; color: #38BDF8; font-family: monospace; font-size: 11px; border-radius: 4px;")
-        self.txt_server_status.setPlaceholderText("O resultado do teste de conexão e lista de impressoras detectadas aparecerá aqui...")
-        layout_server.addWidget(self.txt_server_status)
+        btns_admin_layout = QHBoxLayout()
+        self.btn_enable_server = QPushButton("🚀 Ativar Modo Servidor na Rede")
+        self.btn_enable_server.setStyleSheet("background-color: #2563EB; color: white; font-weight: bold; padding: 8px 12px; border-radius: 4px;")
+        self.btn_enable_server.clicked.connect(self.enable_network_server)
+        btns_admin_layout.addWidget(self.btn_enable_server)
 
-        tabs.addTab(tab_server, "🌐 Servidor na Rede (CUPS)")
+        self.btn_restart_services = QPushButton("🔄 Reiniciar CUPS e Avahi")
+        self.btn_restart_services.clicked.connect(self.restart_cups_services)
+        btns_admin_layout.addWidget(self.btn_restart_services)
+
+        self.btn_disable_server = QPushButton("🔒 Desativar Rede (Apenas Local)")
+        self.btn_disable_server.clicked.connect(self.disable_network_server)
+        btns_admin_layout.addWidget(self.btn_disable_server)
+
+        layout_actions.addLayout(btns_admin_layout)
+        layout_server.addWidget(group_actions)
+
+        # Grupo de Filas Locais
+        group_printers = QGroupBox("Impressoras Locais Instaladas nesta Máquina")
+        layout_printers = QVBoxLayout(group_printers)
+        self.txt_local_printers = QTextEdit()
+        self.txt_local_printers.setReadOnly(True)
+        self.txt_local_printers.setMaximumHeight(100)
+        self.txt_local_printers.setStyleSheet("font-family: monospace; font-size: 11px;")
+        layout_printers.addWidget(self.txt_local_printers)
+        layout_server.addWidget(group_printers)
+
+        tabs.addTab(tab_server, "🖥️ Servidor CUPS Local")
 
         # =========================================================================
-        # ABA 2: Instalação Local via Script (Avançado / Linux)
+        # ABA 2: Instalação de Impressoras via Script
         # =========================================================================
         tab_script = QWidget()
         layout_script = QVBoxLayout(tab_script)
@@ -1176,19 +1285,24 @@ class PrinterInstallerDialog(QDialog):
 
         if sys.platform.startswith("linux"):
             script_info = QLabel(
-                "<b>Instalação Automatizada Local (Apenas Linux):</b><br>"
-                "Baixa e executa um script shell (.sh) para compilar e instalar drivers locais na máquina via root (pkexec). "
-                "Recomendado para administradores preparando uma nova máquina servidora ou computadores isolados."
+                "<b>Instalação Automatizada de Drivers e Impressoras:</b><br>"
+                "Baixe e execute scripts de instalação (.sh) para configurar impressoras automaticamente nesta máquina. "
+                "Você pode utilizar a URL do GitHub ou selecionar um arquivo de script local."
             )
             script_info.setWordWrap(True)
             layout_script.addWidget(script_info)
 
             form_script = QFormLayout()
             self.txt_url = QLineEdit(self.settings.get("script_url", "https://raw.githubusercontent.com/LucasTelesEriceira/gerenciador-impressoes/main/instalar_impressoras.sh"))
-            form_script.addRow("URL do Script (Bash):", self.txt_url)
+            form_script.addRow("URL do Script (GitHub / Web):", self.txt_url)
+
+            btn_browse_script = QPushButton("📁 Escolher Arquivo de Script Local (.sh)...")
+            btn_browse_script.clicked.connect(self.browse_local_script)
+            form_script.addRow("Ou arquivo local:", btn_browse_script)
+
             layout_script.addLayout(form_script)
 
-            self.btn_run = QPushButton("🚀 Baixar e Executar Instalação")
+            self.btn_run = QPushButton("🚀 Executar Script de Instalação")
             self.btn_run.setStyleSheet("background-color: #10B981; color: white; font-weight: bold; padding: 8px; border-radius: 4px;")
             self.btn_run.clicked.connect(self.run_installation)
             layout_script.addWidget(self.btn_run)
@@ -1196,22 +1310,19 @@ class PrinterInstallerDialog(QDialog):
             self.log_console = QTextEdit()
             self.log_console.setReadOnly(True)
             self.log_console.setStyleSheet("background-color: #0F172A; color: #38BDF8; font-family: monospace; font-size: 11px; border-radius: 4px;")
+            self.log_console.setPlaceholderText("A saída da execução do script aparecerá aqui...")
             layout_script.addWidget(self.log_console)
         else:
             win_notice = QLabel(
-                "<h3>ℹ️ Instalação Local no Windows</h3>"
-                "<p>A execução de scripts Bash (.sh) com <code>pkexec</code> é exclusiva para distribuições Linux.</p>"
-                "<p>No Windows, você pode:</p>"
-                "<ul>"
-                "  <li>Adicionar impressoras normalmente pelo <b>Painel de Configurações do Windows</b>.</li>"
-                "  <li>Ou usar a aba <b>'Servidor na Rede (CUPS)'</b> para imprimir diretamente pelo servidor Linux da escola.</li>"
-                "</ul>"
+                "<h3>ℹ️ Gerenciamento no Windows</h3>"
+                "<p>A execução de scripts Bash (.sh) com <code>pkexec</code> é exclusiva para sistemas Linux.</p>"
+                "<p>No Windows, configure impressoras pelo Painel de Controle ou utilize as impressoras compartilhadas da rede.</p>"
             )
             win_notice.setWordWrap(True)
             layout_script.addWidget(win_notice)
             layout_script.addStretch()
 
-        tabs.addTab(tab_script, "⚙️ Script Avançado (Linux)")
+        tabs.addTab(tab_script, "📥 Instalar via Script")
 
         main_layout.addWidget(tabs)
 
@@ -1221,75 +1332,119 @@ class PrinterInstallerDialog(QDialog):
 
         self.setLayout(main_layout)
 
-    def test_and_connect_server(self):
-        server = self.txt_server_ip.text().strip()
-        port = self.sp_server_port.value()
-        if not server:
-            QMessageBox.warning(self, "Aviso", "Por favor, digite o endereço IP ou nome do servidor CUPS.")
+        # Checa status ao inicializar
+        self.check_local_server_status()
+
+    def check_local_server_status(self):
+        if not sys.platform.startswith("linux"):
+            self.lbl_cups_service.setText("Não aplicável (Windows)")
+            self.lbl_avahi_service.setText("Não aplicável (Windows)")
+            self.lbl_sharing_status.setText("Não aplicável (Windows)")
             return
 
-        self.txt_server_status.clear()
-        self.txt_server_status.append(f"[*] Testando comunicação com {server}:{port}...")
-        QApplication.processEvents()
+        # 1. CUPS Service
+        try:
+            out_cups = subprocess.check_output(["systemctl", "is-active", "cups"], text=True, stderr=subprocess.DEVNULL).strip()
+            if out_cups == "active":
+                self.lbl_cups_service.setText("🟢 <b>Ativo</b> (Em execução)")
+            else:
+                self.lbl_cups_service.setText(f"⚪ <b>{out_cups.capitalize()}</b>")
+        except Exception:
+            self.lbl_cups_service.setText("🔴 <b>Inativo / Não instalado</b>")
 
-        printers = get_system_printers(server, port)
-        if printers:
-            self.txt_server_status.append(f"\n[✓] Conexão bem-sucedida! {len(printers)} impressora(s) encontrada(s):")
-            for p in printers:
-                self.txt_server_status.append(f"   🖨️  {p}")
+        # 2. Avahi Daemon
+        try:
+            out_avahi = subprocess.check_output(["systemctl", "is-active", "avahi-daemon"], text=True, stderr=subprocess.DEVNULL).strip()
+            if out_avahi == "active":
+                self.lbl_avahi_service.setText("🟢 <b>Ativo</b> (Descoberta na rede em funcionamento)")
+            else:
+                self.lbl_avahi_service.setText(f"⚪ <b>{out_avahi.capitalize()}</b>")
+        except Exception:
+            self.lbl_avahi_service.setText("🔴 <b>Inativo / Não instalado</b>")
 
-            self.settings["cups_server"] = server
-            self.settings["cups_port"] = port
-            save_settings(self.settings)
+        # 3. Sharing status via cupsctl
+        try:
+            out_ctl = subprocess.check_output(["cupsctl"], text=True, stderr=subprocess.DEVNULL)
+            is_shared = "_share_printers=1" in out_ctl and "_remote_any=1" in out_ctl
+            if is_shared:
+                self.lbl_sharing_status.setText("🟢 <b>Ativado</b> (Aceita conexões da rede local)")
+            else:
+                self.lbl_sharing_status.setText("⚪ <b>Desativado</b> (Apenas conexões locais)")
+        except Exception:
+            self.lbl_sharing_status.setText("⚪ Indisponível")
 
-            if hasattr(self.main_app, "settings"):
-                self.main_app.settings = self.settings
-                if hasattr(self.main_app, "apply_cups_environment"):
-                    self.main_app.apply_cups_environment()
-                if hasattr(self.main_app, "load_printers"):
-                    self.main_app.load_printers()
+        # 4. Lista de impressoras locais
+        try:
+            out_lp = subprocess.check_output(["lpstat", "-p"], text=True, stderr=subprocess.DEVNULL).strip()
+            if out_lp:
+                self.txt_local_printers.setPlainText(out_lp)
+            else:
+                self.txt_local_printers.setPlainText("Nenhuma impressora configurada localmente nesta máquina.")
+        except Exception:
+            self.txt_local_printers.setPlainText("Não foi possível listar as impressoras locais.")
 
-            self.txt_server_status.append("\n[✓] Servidor salvo! As impressoras já estão carregadas na tela principal.")
-            QMessageBox.information(self, "Sucesso", f"Servidor CUPS conectado com sucesso!\n{len(printers)} impressora(s) disponível(is).")
-        else:
-            self.txt_server_status.append(f"\n[X] Falha ao comunicar com o servidor '{server}:{port}'.")
-            self.txt_server_status.append("Verifique se o IP está correto e se o servidor CUPS aceita conexões de rede.")
-            QMessageBox.warning(self, "Falha de Conexão", f"Não foi possível obter a lista de impressoras de '{server}:{port}'.\nVerifique se o servidor está ativo.")
+    def enable_network_server(self):
+        if not sys.platform.startswith("linux"):
+            return
+        cmd = "cupsctl --remote-any --share-printers && systemctl enable --now cups avahi-daemon"
+        self.execute_admin_command(cmd, "Ativação do Modo Servidor de Rede")
 
-    def use_local_cups(self):
-        self.txt_server_ip.clear()
-        self.settings["cups_server"] = ""
-        save_settings(self.settings)
-        if hasattr(self.main_app, "settings"):
-            self.main_app.settings = self.settings
-            if hasattr(self.main_app, "apply_cups_environment"):
-                self.main_app.apply_cups_environment()
-            if hasattr(self.main_app, "load_printers"):
-                self.main_app.load_printers()
-        self.txt_server_status.clear()
-        self.txt_server_status.append("[✓] Configuração alterada para impressoras locais.")
-        QMessageBox.information(self, "Sistema Local", "O aplicativo agora está utilizando as impressoras do sistema local.")
+    def restart_cups_services(self):
+        if not sys.platform.startswith("linux"):
+            return
+        cmd = "systemctl restart cups avahi-daemon"
+        self.execute_admin_command(cmd, "Reinicialização dos Serviços CUPS e Avahi")
+
+    def disable_network_server(self):
+        if not sys.platform.startswith("linux"):
+            return
+        cmd = "cupsctl --no-remote-any --no-share-printers"
+        self.execute_admin_command(cmd, "Desativação do Compartilhamento de Rede")
+
+    def execute_admin_command(self, bash_cmd, action_name):
+        full_cmd = f"pkexec bash -c '{bash_cmd}'"
+        try:
+            res = subprocess.run(full_cmd, shell=True, text=True, capture_output=True)
+            if res.returncode == 0:
+                QMessageBox.information(self, "Sucesso", f"{action_name} concluída com sucesso!")
+                self.check_local_server_status()
+            else:
+                err = res.stderr.strip() or f"Código de saída: {res.returncode}"
+                QMessageBox.warning(self, "Aviso", f"Não foi possível concluir a ação:\n{err}")
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Falha ao executar comando:\n{str(e)}")
+
+    def browse_local_script(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Selecionar Script de Instalação", "", "Scripts Shell (*.sh);;Todos os Arquivos (*)")
+        if path:
+            self.txt_url.setText(path)
 
     def run_installation(self):
         if not sys.platform.startswith("linux"):
             return
-        url = self.txt_url.text().strip()
-        if not url:
-            QMessageBox.warning(self, "Aviso", "Informe a URL do script.")
+        target = self.txt_url.text().strip()
+        if not target:
+            QMessageBox.warning(self, "Aviso", "Informe a URL ou o arquivo do script.")
             return
 
+        self.settings["script_url"] = target
+        save_settings(self.settings)
+
         self.log_console.clear()
-        self.log_console.append(f"[*] Baixando e iniciando script de: {url}\n")
         self.btn_run.setEnabled(False)
 
-        script_tmp = f"/tmp/install_printers_{os.getpid()}.sh"
-        cmd = f"curl -sSL '{url}' -o '{script_tmp}' && chmod +x '{script_tmp}' && pkexec '{script_tmp}'"
+        if target.startswith("http://") or target.startswith("https://"):
+            self.log_console.append(f"[*] Baixando e iniciando script de: {target}\n")
+            script_tmp = f"/tmp/install_printers_{os.getpid()}.sh"
+            cmd = f"curl -sSL '{target}' -o '{script_tmp}' && chmod +x '{script_tmp}' && pkexec '{script_tmp}'"
+        else:
+            self.log_console.append(f"[*] Executando script local: {target}\n")
+            cmd = f"chmod +x '{target}' && pkexec '{target}'"
 
         self.process = QProcess(self)
         self.process.readyReadStandardOutput.connect(self.on_stdout)
         self.process.readyReadStandardError.connect(self.on_stderr)
         self.process.finished.connect(self.on_finished)
-
         self.process.start("bash", ["-c", cmd])
 
     def on_stdout(self):
@@ -1306,10 +1461,15 @@ class PrinterInstallerDialog(QDialog):
         self.btn_run.setEnabled(True)
         if exit_code == 0:
             self.log_console.append("\n[✓] Processo concluído com sucesso!")
+            self.check_local_server_status()
             if hasattr(self.main_app, "load_printers"):
                 self.main_app.load_printers()
         else:
             self.log_console.append(f"\n[X] Processo finalizado com código de saída {exit_code}.")
+
+
+# Alias para retrocompatibilidade
+PrinterInstallerDialog = ServerManagerDialog
 
 
 class QueueDialog(QDialog):
@@ -1799,7 +1959,7 @@ class PrintManagerApp(QMainWindow):
 
         menu_config = menubar.addMenu("&Configurações")
 
-        act_settings = QAction("&Preferências e Servidor CUPS...", self)
+        act_settings = QAction("&Preferências do Cliente e Conexão...", self)
         act_settings.setShortcut("Ctrl+,")
         act_settings.triggered.connect(self.open_settings_dialog)
         menu_config.addAction(act_settings)
@@ -1811,7 +1971,7 @@ class PrintManagerApp(QMainWindow):
         act_queue.triggered.connect(self.open_queue_dialog)
         menu_tools.addAction(act_queue)
 
-        act_installer = QAction("Configurar &Impressoras / Servidor...", self)
+        act_installer = QAction("&Central do Servidor CUPS e Drivers...", self)
         act_installer.triggered.connect(self.open_installer_dialog)
         menu_tools.addAction(act_installer)
 
