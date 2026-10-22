@@ -5,17 +5,33 @@ import subprocess
 import shutil
 import json
 import urllib.request
+import urllib.error
 import csv
+import ssl
+import tempfile
 from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, 
                              QLabel, QPushButton, QComboBox, QSpinBox, QLineEdit,
                              QFileDialog, QMessageBox, QGroupBox, QFormLayout,
                              QScrollArea, QSplitter, QProgressBar, QFrame, QShortcut,
                              QMenuBar, QMenu, QAction, QDialog, QTableWidget, QTableWidgetItem,
-                             QHeaderView, QTextEdit, QCheckBox, QDialogButtonBox, QTabWidget)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QProcess
-from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QPalette, QIcon
+                             QHeaderView, QTextEdit, QCheckBox, QDialogButtonBox, QTabWidget,
+                             QProgressDialog)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QProcess, QUrl
+from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QPalette, QIcon, QDesktopServices
 from PyQt5.QtPrintSupport import QPrinterInfo
+
+# Garantir localização dos certificados CA raiz para conexões seguras
+if "SSL_CERT_FILE" not in os.environ:
+    for _ca_bundle in [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/ca-bundle.pem",
+        "/etc/ssl/cert.pem"
+    ]:
+        if os.path.exists(_ca_bundle):
+            os.environ["SSL_CERT_FILE"] = _ca_bundle
+            break
 
 CURRENT_VERSION = "v1.1.0"
 SETTINGS_DIR = os.path.expanduser("~/.config/gerenciador_impressoes_pro")
@@ -872,6 +888,56 @@ class PrintWorkerThread(QThread):
                         pass
 
 
+def get_ssl_context():
+    """
+    Retorna um contexto SSL configurado para tentar verificar certificados de CA do sistema,
+    ou fallback com certificados de certifi / padrão do sistema.
+    """
+    ctx = None
+    for ca_path in [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/ca-bundle.pem",
+        "/etc/ssl/cert.pem"
+    ]:
+        if os.path.exists(ca_path):
+            try:
+                ctx = ssl.create_default_context(cafile=ca_path)
+                break
+            except Exception:
+                pass
+    if ctx is None:
+        try:
+            import certifi
+            ctx = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            ctx = ssl.create_default_context()
+    return ctx
+
+
+def safe_urlopen(req_or_url, timeout=30):
+    """
+    Abre uma requisição HTTP/HTTPS de forma segura e resiliente a falhas
+    de certificados locais em ambientes AppImage, empacotados ou com certificados customizados.
+    """
+    if isinstance(req_or_url, str):
+        req = urllib.request.Request(req_or_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+    else:
+        req = req_or_url
+
+    try:
+        ctx = get_ssl_context()
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+        return opener.open(req, timeout=timeout)
+    except Exception as e:
+        err_str = str(e).lower()
+        if "certificate" in err_str or "ssl" in err_str or "verify_failed" in err_str:
+            unverified_ctx = ssl._create_unverified_context()
+            opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=unverified_ctx))
+            return opener.open(req, timeout=timeout)
+        raise
+
+
 class UpdateCheckerThread(QThread):
     checked = pyqtSignal(bool, str, dict, str)
 
@@ -883,13 +949,56 @@ class UpdateCheckerThread(QThread):
         try:
             url = "https://api.github.com/repos/LucasTelesEriceira/gerenciador-impressoes/releases/latest"
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response:
-                data = json.loads(response.read().decode())
+            with safe_urlopen(req, timeout=15) as response:
+                data = json.loads(response.read().decode('utf-8', errors='replace'))
             latest_version = data.get("tag_name", "")
-            has_update = bool(latest_version and latest_version != self.current_version)
+
+            clean_latest = latest_version.lstrip("v").strip()
+            clean_curr = self.current_version.lstrip("v").strip()
+            has_update = bool(clean_latest and clean_latest != clean_curr)
+
             self.checked.emit(has_update, latest_version, data, "")
         except Exception as e:
             self.checked.emit(False, "", {}, str(e))
+
+
+class UpdateDownloadThread(QThread):
+    progress = pyqtSignal(int, int)  # (bytes_downloaded, total_bytes)
+    finished = pyqtSignal(str)       # local_dest_path
+    error = pyqtSignal(str)
+
+    def __init__(self, download_url, dest_path):
+        super().__init__()
+        self.download_url = download_url
+        self.dest_path = dest_path
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    def run(self):
+        try:
+            req = urllib.request.Request(self.download_url, headers={'User-Agent': 'Mozilla/5.0'})
+            response = safe_urlopen(req, timeout=30)
+            total_size = int(response.headers.get('Content-Length', 0))
+            downloaded = 0
+            chunk_size = 64 * 1024
+
+            with open(self.dest_path, 'wb') as f:
+                while True:
+                    if self._is_cancelled:
+                        return
+                    chunk = response.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    self.progress.emit(downloaded, total_size)
+
+            if not self._is_cancelled:
+                self.finished.emit(self.dest_path)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class DropZoneFrame(QFrame):
@@ -2428,53 +2537,172 @@ class PrintManagerApp(QMainWindow):
     def on_update_checked(self, has_update, latest_version, release_data, error_msg):
         self.lbl_status.setText("")
         if error_msg:
-            QMessageBox.warning(self, "Erro", f"Não foi possível verificar atualizações.\n{error_msg}")
+            QMessageBox.warning(
+                self, "Verificação de Atualizações",
+                f"Não foi possível verificar atualizações no momento.\n\nDetalhes:\n{error_msg}"
+            )
             return
 
         if has_update:
+            body = release_data.get("body", "")
+            notes = f"\n\nNotas do lançamento:\n{body[:250]}..." if body else ""
             reply = QMessageBox.question(
                 self, 'Atualização Disponível!',
-                f"Uma nova versão ({latest_version}) foi encontrada!\n\nDeseja baixar e atualizar agora?",
+                f"Uma nova versão ({latest_version}) foi encontrada!\n(Versão instalada: {CURRENT_VERSION}){notes}\n\nDeseja baixar e atualizar agora?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
             )
             if reply == QMessageBox.Yes:
                 self.perform_update(release_data)
         else:
-            QMessageBox.information(self, "Atualizado", "Você já está usando a versão mais recente!")
+            QMessageBox.information(
+                self, "Atualizado",
+                f"Você já está usando a versão mais recente ({CURRENT_VERSION})!"
+            )
 
     def perform_update(self, release_data):
-        appimage_url = None
+        is_windows = sys.platform.startswith("win32")
+        is_linux = sys.platform.startswith("linux")
+
+        target_asset = None
+        asset_url = None
+        asset_name = ""
+
+        # Encontrar o asset correspondente ao sistema operacional
         for asset in release_data.get("assets", []):
-            if asset.get("name", "").endswith(".AppImage"):
-                appimage_url = asset.get("browser_download_url")
+            name = asset.get("name", "")
+            if is_windows and name.endswith(".exe"):
+                target_asset = asset
+                asset_url = asset.get("browser_download_url")
+                asset_name = name
+                break
+            elif is_linux and name.endswith(".AppImage"):
+                target_asset = asset
+                asset_url = asset.get("browser_download_url")
+                asset_name = name
                 break
 
-        if not appimage_url:
-            QMessageBox.warning(self, "Erro", "Arquivo .AppImage não encontrado no lançamento do GitHub.")
+        html_url = release_data.get("html_url", "https://github.com/LucasTelesEriceira/gerenciador-impressoes/releases")
+
+        if not asset_url:
+            reply = QMessageBox.question(
+                self, "Instalador Não Encontrado",
+                f"Não foi encontrado um pacote binário automatizado para o seu sistema ({sys.platform}) neste lançamento.\n\nDeseja abrir a página do GitHub para baixar manualmente?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                QDesktopServices.openUrl(QUrl(html_url))
             return
 
+        # Verificar se está rodando em ambiente compilado/instalado
+        is_frozen = getattr(sys, 'frozen', False)
         current_appimage = os.environ.get("APPIMAGE")
-        if not current_appimage:
-            QMessageBox.information(self, "Aviso", "O programa não está rodando como um AppImage isolado.\n(Para atualizar, você precisa rodar a versão compilada).")
+
+        if is_linux and not current_appimage:
+            reply = QMessageBox.question(
+                self, "Execução em Modo Script",
+                "O programa está sendo executado diretamente a partir do código Python ou de um diretório descompactado, e não a partir de um pacote .AppImage montado.\n\nDeseja abrir a página do lançamento no GitHub para baixar o novo pacote?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                QDesktopServices.openUrl(QUrl(html_url))
             return
 
-        try:
-            self.lbl_status.setText("Baixando atualização... Aguarde!")
-            QApplication.processEvents()
+        if is_windows and not is_frozen:
+            reply = QMessageBox.question(
+                self, "Execução em Modo Script",
+                "O programa está sendo executado diretamente via script Python no Windows.\n\nDeseja abrir a página do lançamento no GitHub para baixar o executável (.exe) da nova versão?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                QDesktopServices.openUrl(QUrl(html_url))
+            return
 
-            req = urllib.request.Request(appimage_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response:
-                with open(current_appimage, 'wb') as f:
-                    shutil.copyfileobj(response, f)
+        # Preparar arquivo de destino temporário
+        if is_linux:
+            dest_tmp = current_appimage + ".part"
+        else:
+            dest_tmp = os.path.join(tempfile.gettempdir(), f"Gerenciador_Impressoes_Pro_{release_data.get('tag_name', 'new')}.exe")
 
-            os.chmod(current_appimage, 0o755)
+        # Configurar diálogo de progresso modal
+        progress_dlg = QProgressDialog(f"Iniciando download de {asset_name}...", "Cancelar", 0, 100, self)
+        progress_dlg.setWindowTitle("Baixando Atualização")
+        progress_dlg.setWindowModality(Qt.WindowModal)
+        progress_dlg.setMinimumDuration(0)
+        progress_dlg.setValue(0)
 
-            QMessageBox.information(self, "Sucesso!", "Atualização concluída com sucesso!\nO aplicativo será reiniciado.")
-            os.execv(current_appimage, [current_appimage] + sys.argv[1:])
+        download_thread = UpdateDownloadThread(asset_url, dest_tmp)
 
-        except Exception as e:
-            QMessageBox.critical(self, "Erro fatal", f"Falha ao tentar baixar/aplicar a atualização:\n{str(e)}")
+        def on_progress(downloaded, total):
+            if total > 0:
+                percent = int((downloaded / total) * 100)
+                progress_dlg.setValue(percent)
+                mb_down = downloaded / (1024 * 1024)
+                mb_total = total / (1024 * 1024)
+                progress_dlg.setLabelText(f"Baixando {asset_name}...\n{mb_down:.1f} MB de {mb_total:.1f} MB ({percent}%)")
+            else:
+                mb_down = downloaded / (1024 * 1024)
+                progress_dlg.setLabelText(f"Baixando {asset_name}...\n{mb_down:.1f} MB baixados...")
+
+        def on_cancelled():
+            download_thread.cancel()
+            try:
+                if os.path.exists(dest_tmp):
+                    os.remove(dest_tmp)
+            except Exception:
+                pass
+            self.lbl_status.setText("Atualização cancelada.")
+
+        def on_finished(downloaded_file):
+            progress_dlg.close()
+            try:
+                if is_linux:
+                    os.replace(downloaded_file, current_appimage)
+                    os.chmod(current_appimage, 0o755)
+                    QMessageBox.information(
+                        self, "Atualização Concluída",
+                        "O aplicativo foi atualizado com sucesso!\nO sistema será reiniciado agora."
+                    )
+                    os.execv(current_appimage, [current_appimage] + sys.argv[1:])
+                elif is_windows:
+                    current_exe = sys.executable
+                    batch_path = os.path.join(tempfile.gettempdir(), "update_gerenciador.bat")
+                    with open(batch_path, "w", encoding="cp1252") as f:
+                        f.write(f'''@echo off
+timeout /t 2 /nobreak > NUL
+copy /y "{downloaded_file}" "{current_exe}"
+del "{downloaded_file}"
+start "" "{current_exe}"
+del "%~f0"
+''')
+                    QMessageBox.information(
+                        self, "Atualização Concluída",
+                        "O aplicativo foi atualizado com sucesso!\nO sistema será reiniciado agora."
+                    )
+                    detached = 0x00000008  # DETACHED_PROCESS
+                    subprocess.Popen(["cmd.exe", "/c", batch_path], creationflags=detached)
+                    QApplication.quit()
+                    sys.exit(0)
+            except Exception as ex:
+                QMessageBox.critical(self, "Erro ao Aplicar Atualização", f"Falha ao substituir o arquivo executável:\n{str(ex)}")
+
+        def on_error(err_msg):
+            progress_dlg.close()
+            try:
+                if os.path.exists(dest_tmp):
+                    os.remove(dest_tmp)
+            except Exception:
+                pass
+            QMessageBox.critical(self, "Erro no Download", f"Falha ao baixar a atualização:\n{err_msg}")
             self.lbl_status.setText("")
+
+        progress_dlg.canceled.connect(on_cancelled)
+        download_thread.progress.connect(on_progress)
+        download_thread.finished.connect(on_finished)
+        download_thread.error.connect(on_error)
+
+        # Guarda referência para o Garbage Collector não descartar a thread
+        self._current_download_thread = download_thread
+        download_thread.start()
 
 
 if __name__ == "__main__":

@@ -107,6 +107,15 @@ jobs:
           cat << 'EOF' > AppDir/AppRun
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "${0}")")"
+
+          # Garantir que o Python encontre os certificados CA raiz do sistema host
+          for cert in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem /etc/ssl/cert.pem; do
+              if [ -f "$cert" ]; then
+                  export SSL_CERT_FILE="$cert"
+                  break
+              fi
+          done
+
           exec "${HERE}/usr/bin/Gerenciador_Impressoes_Pro" "$@"
           EOF
           chmod +x AppDir/AppRun
