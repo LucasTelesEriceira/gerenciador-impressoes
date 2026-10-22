@@ -33,10 +33,33 @@ if "SSL_CERT_FILE" not in os.environ:
             os.environ["SSL_CERT_FILE"] = _ca_bundle
             break
 
-CURRENT_VERSION = "v1.1.0"
+CURRENT_VERSION = "v1.3.0"
 SETTINGS_DIR = os.path.expanduser("~/.config/gerenciador_impressoes_pro")
 SETTINGS_FILE = os.path.join(SETTINGS_DIR, "settings.json")
 HISTORY_FILE = os.path.join(SETTINGS_DIR, "history.json")
+
+SUPPORTED_EXTENSIONS = [
+    '.pdf',
+    '.docx', '.doc', '.odt', '.rtf', '.txt',
+    '.xlsx', '.xls', '.ods', '.csv',
+    '.pptx', '.ppt', '.odp'
+]
+
+SUPPORTED_MIME_TYPES = (
+    "application/pdf;"
+    "application/vnd.oasis.opendocument.text;"
+    "application/vnd.oasis.opendocument.spreadsheet;"
+    "application/vnd.oasis.opendocument.presentation;"
+    "application/msword;"
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document;"
+    "application/vnd.ms-excel;"
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;"
+    "application/vnd.ms-powerpoint;"
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation;"
+    "text/plain;"
+    "text/rtf;"
+    "text/csv;"
+)
 
 
 def load_settings():
@@ -1021,7 +1044,7 @@ class DropZoneFrame(QFrame):
             if urls:
                 path = urls[0].toLocalFile()
                 ext = os.path.splitext(path)[1].lower()
-                if ext in ['.pdf', '.docx', '.doc', '.odt', '.txt', '.rtf']:
+                if ext in SUPPORTED_EXTENSIONS:
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -1698,14 +1721,16 @@ class AboutDialog(QDialog):
         layout.addWidget(lbl_ver)
 
         info_text = (
-            "<p align='center'>Solução completa e de alta performance para gerenciamento e preparação de impressão no Linux.</p>"
+            "<p align='center'>Solução completa e de alta performance para gerenciamento e preparação de impressão no Linux e Windows.</p>"
             "<hr>"
-            "<b>Destaques do Sistema:</b><br>"
+            "<b>Destaques da Versão " + CURRENT_VERSION + ":</b><br>"
+            "• Suporte a PDF, Word (DOCX/DOC), LibreOffice (ODT), Planilhas (XLSX/XLS/ODS/CSV), Apresentações (PPTX/PPT/ODP) e Texto<br>"
+            "• Integração nativa com o sistema ('Abrir com...') e lançadores de aplicativos<br>"
             "• Pré-visualização ultra-rápida (QThread + pdftoppm)<br>"
-            "• Suporte a N-Up (slides por folha) e Modo Cartaz (Poster)<br>"
-            "• Suporte a Servidor CUPS remoto e controle de fila<br>"
+            "• Suporte a N-Up (slides por folha) e Modo Cartaz (Pôster)<br>"
+            "• Gerenciamento completo de Servidor CUPS (local/remoto) e fila em tempo real<br>"
             "• Histórico de impressões com exportação CSV e reimpressão<br>"
-            "• Integração com scripts automatizados do GitHub<br>"
+            "• Atualizações automáticas seguras e integradas<br>"
             "<hr>"
             "<p align='center'>Desenvolvido para máxima produtividade.<br>"
             "<a href='https://github.com/LucasTelesEriceira/gerenciador-impressoes'>Repositório GitHub</a></p>"
@@ -1782,6 +1807,8 @@ class PrintManagerApp(QMainWindow):
         self.settings = load_settings()
         self.apply_cups_environment()
         self.initUI()
+        if sys.platform.startswith("linux"):
+            self.integrate_with_system(silent=True)
 
     def apply_cups_environment(self):
         server = self.settings.get("cups_server", "").strip()
@@ -1836,7 +1863,7 @@ class PrintManagerApp(QMainWindow):
         self.lbl_drop_title.setAlignment(Qt.AlignCenter)
         self.lbl_drop_title.setStyleSheet("font-size: 13px; font-weight: bold;")
 
-        self.lbl_drop_sub = QLabel("ou clique para selecionar (PDF, DOCX, ODT, TXT)")
+        self.lbl_drop_sub = QLabel("ou clique para selecionar (PDF, Word, Planilhas, Slides, TXT)")
         self.lbl_drop_sub.setAlignment(Qt.AlignCenter)
         self.lbl_drop_sub.setStyleSheet("font-size: 11px; opacity: 0.8;")
 
@@ -2084,6 +2111,12 @@ class PrintManagerApp(QMainWindow):
         act_installer.triggered.connect(self.open_installer_dialog)
         menu_tools.addAction(act_installer)
 
+        if sys.platform.startswith("linux"):
+            menu_tools.addSeparator()
+            act_integrate = QAction("📦 &Integrar ao Sistema (Atalho e Menu 'Abrir com')...", self)
+            act_integrate.triggered.connect(lambda: self.integrate_with_system(silent=False))
+            menu_tools.addAction(act_integrate)
+
         menu_help = menubar.addMenu("A&juda")
 
         act_shortcuts = QAction("&Atalhos de Teclado", self)
@@ -2186,7 +2219,7 @@ class PrintManagerApp(QMainWindow):
             if urls:
                 path = urls[0].toLocalFile()
                 ext = os.path.splitext(path)[1].lower()
-                if ext in ['.pdf', '.docx', '.doc', '.odt', '.txt', '.rtf']:
+                if ext in SUPPORTED_EXTENSIONS:
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -2221,7 +2254,7 @@ class PrintManagerApp(QMainWindow):
 
         self.lbl_file.setText("Nenhum arquivo selecionado")
         self.lbl_drop_title.setText("Arraste e solte seu documento aqui")
-        self.lbl_drop_sub.setText("ou clique para selecionar (PDF, DOCX, ODT, TXT)")
+        self.lbl_drop_sub.setText("ou clique para selecionar (PDF, Word, Planilhas, Slides, TXT)")
         self.lbl_preview.setPixmap(QPixmap())
         self.lbl_preview.setText("Selecione ou arraste um documento para visualizar a prévia")
         self.lbl_page_info.setText("Página 0 de 0")
@@ -2234,7 +2267,14 @@ class PrintManagerApp(QMainWindow):
         if not os.path.exists(default_dir):
             default_dir = os.path.expanduser("~/")
 
-        filters = "Todos os Arquivos (*);;Documentos PDF (*.pdf);;Documentos Word (*.docx *.doc);;Documentos LibreOffice (*.odt);;Arquivos de Texto (*.txt *.rtf)"
+        filters = (
+            "Todos os Formatos Suportados (*.pdf *.docx *.doc *.odt *.xlsx *.xls *.ods *.pptx *.ppt *.odp *.txt *.rtf *.csv);;"
+            "Documentos PDF (*.pdf);;"
+            "Documentos de Texto (*.docx *.doc *.odt *.txt *.rtf);;"
+            "Planilhas (*.xlsx *.xls *.ods *.csv);;"
+            "Apresentações de Slides (*.pptx *.ppt *.odp);;"
+            "Todos os Arquivos (*)"
+        )
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Selecione o Documento",
@@ -2704,11 +2744,109 @@ del "%~f0"
         self._current_download_thread = download_thread
         download_thread.start()
 
+    def integrate_with_system(self, silent=False):
+        if not sys.platform.startswith("linux"):
+            if not silent:
+                QMessageBox.information(self, "Aviso", "A integração com lançador e menu de contexto é exclusiva para Linux.")
+            return
+
+        try:
+            home = os.path.expanduser("~")
+            apps_dir = os.path.join(home, ".local", "share", "applications")
+            desktop_path = os.path.join(apps_dir, "gerenciador-impressoes.desktop")
+
+            # 1. Determinar o executável correto
+            appimage_path = os.environ.get("APPIMAGE")
+            if appimage_path and os.path.exists(appimage_path):
+                exec_cmd = f'"{appimage_path}"'
+            elif getattr(sys, 'frozen', False):
+                exec_cmd = f'"{sys.executable}"'
+            else:
+                script_path = os.path.abspath(__file__)
+                exec_cmd = f'python3 "{script_path}"'
+
+            # 2. Localizar o ícone do projeto
+            icon_source = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
+            if not os.path.exists(icon_source):
+                base_dir = os.path.dirname(sys.executable)
+                candidate = os.path.join(base_dir, "icon.png")
+                if os.path.exists(candidate):
+                    icon_source = candidate
+
+            # 3. Instalar ícones nos diretórios padrão do usuário
+            icons_base = os.path.join(home, ".local", "share", "icons", "hicolor")
+            pixmaps_dir = os.path.join(home, ".local", "share", "pixmaps")
+            os.makedirs(pixmaps_dir, exist_ok=True)
+
+            if os.path.exists(icon_source):
+                try:
+                    from PIL import Image
+                    src_img = Image.open(icon_source)
+                    for sz in [16, 32, 48, 64, 128, 256, 512]:
+                        sz_dir = os.path.join(icons_base, f"{sz}x{sz}", "apps")
+                        os.makedirs(sz_dir, exist_ok=True)
+                        dest_file = os.path.join(sz_dir, "gerenciador-impressoes.png")
+                        resized = src_img.resize((sz, sz), Image.Resampling.LANCZOS)
+                        resized.save(dest_file)
+                except Exception:
+                    sz_dir = os.path.join(icons_base, "256x256", "apps")
+                    os.makedirs(sz_dir, exist_ok=True)
+                    shutil.copyfile(icon_source, os.path.join(sz_dir, "gerenciador-impressoes.png"))
+
+                shutil.copyfile(icon_source, os.path.join(pixmaps_dir, "gerenciador-impressoes.png"))
+
+            # 4. Criar o arquivo .desktop com suporte a %F e todos os tipos MIME
+            os.makedirs(apps_dir, exist_ok=True)
+            desktop_content = f"""[Desktop Entry]
+Name=Gerenciador de Impressões Pro
+GenericName=Gerenciador de Impressão
+Comment=Gerenciador Avançado de Impressão, Pré-visualização e Fila CUPS
+Exec={exec_cmd} %F
+Icon=gerenciador-impressoes
+Terminal=false
+Type=Application
+Categories=Office;Utility;Printing;
+MimeType={SUPPORTED_MIME_TYPES}
+StartupNotify=true
+"""
+            with open(desktop_path, "w", encoding="utf-8") as f:
+                f.write(desktop_content)
+            os.chmod(desktop_path, 0o755)
+
+            # 5. Atualizar bancos de dados do ambiente desktop
+            try:
+                subprocess.run(["update-desktop-database", apps_dir], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+            try:
+                subprocess.run(["kbuildsycoca6"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                try:
+                    subprocess.run(["kbuildsycoca5"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+
+            if not silent:
+                QMessageBox.information(
+                    self, "Integração Concluída",
+                    "O Gerenciador de Impressões Pro foi integrado com sucesso ao sistema!\n\n"
+                    "• Ícone oficial adicionado ao lançador de aplicativos do BigLinux.\n"
+                    "• Habilitada a opção 'Abrir com...' no menu de contexto (botão direito) do Dolphin para PDF, Word, Planilhas, Slides e Textos."
+                )
+        except Exception as e:
+            if not silent:
+                QMessageBox.warning(self, "Falha na Integração", f"Não foi possível concluir a integração com o sistema:\n{str(e)}")
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Breeze")
 
     window = PrintManagerApp()
+
+    # Abrir documento diretamente se passado por argumento (ex: botão direito -> 'Abrir com...')
+    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
+        window.load_selected_file(sys.argv[1])
+
     window.show()
     sys.exit(app.exec_())

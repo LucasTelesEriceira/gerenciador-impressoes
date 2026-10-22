@@ -89,19 +89,42 @@ jobs:
       - name: Gerar Pacote AppImage
         run: |
           mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/applications
           cp -r dist/Gerenciador_Impressoes_Pro/* AppDir/usr/bin/
+
+          # Gerar ícones em todas as resoluções padrão para o KDE Plasma / BigLinux / GNOME
+          python3 -c "
+          from PIL import Image
+          import os
+
+          img = Image.open('icon.png')
+          for sz in [16, 32, 48, 64, 128, 256, 512]:
+              d = f'AppDir/usr/share/icons/hicolor/{sz}x{sz}/apps'
+              os.makedirs(d, exist_ok=True)
+              img.resize((sz, sz), Image.Resampling.LANCZOS).save(f'{d}/gerenciador-impressoes.png')
+          "
+
+          # Ícones na raiz do AppDir
+          cp icon.png AppDir/gerenciador-impressoes.png
           cp icon.png AppDir/icon.png
           cp icon.png AppDir/.DirIcon
           
-          # Criar arquivo .desktop
+          # Criar arquivo .desktop oficial com %F e todos os tipos MIME para menu de contexto e lançador
           cat << 'EOF' > AppDir/gerenciador-impressoes.desktop
           [Desktop Entry]
           Name=Gerenciador de Impressões Pro
-          Exec=Gerenciador_Impressoes_Pro
-          Icon=icon
+          GenericName=Gerenciador de Impressão
+          Comment=Gerenciador Avançado de Impressão, Pré-visualização e Fila CUPS
+          Exec=Gerenciador_Impressoes_Pro %F
+          Icon=gerenciador-impressoes
+          Terminal=false
           Type=Application
-          Categories=Utility;
+          Categories=Office;Utility;Printing;
+          MimeType=application/pdf;application/vnd.oasis.opendocument.text;application/vnd.oasis.opendocument.spreadsheet;application/vnd.oasis.opendocument.presentation;application/msword;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.ms-excel;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.ms-powerpoint;application/vnd.openxmlformats-officedocument.presentationml.presentation;text/plain;text/rtf;text/csv;
+          StartupNotify=true
           EOF
+
+          cp AppDir/gerenciador-impressoes.desktop AppDir/usr/share/applications/gerenciador-impressoes.desktop
 
           # Criar script de inicialização AppRun
           cat << 'EOF' > AppDir/AppRun
