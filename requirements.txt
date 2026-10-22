@@ -1,0 +1,5 @@
+pypdf
+pdftools.pdfposter
+PyQt5
+pyinstaller
+pillow
