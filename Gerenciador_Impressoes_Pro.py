@@ -88,6 +88,7 @@ def load_settings():
         "default_paper": "A4",
         "default_media_type": "Papel Comum (Padrão)",
         "default_quality": "Normal (Padrão)",
+        "default_print_speed": "Normal (Padrão)",
         "keep_history": True,
         "max_history_entries": 100,
         "script_url": "https://raw.githubusercontent.com/LucasTelesEriceira/gerenciador-impressoes/main/instalar_impressoras.sh"
@@ -589,6 +590,104 @@ def get_printer_media_types(printer_name, cups_server=""):
     return fallback_media_types
 
 
+def format_speed_label(raw_val, display_val):
+    combined = f"{raw_val} {display_val}".lower()
+    if any(k in combined for k in ['fast', 'high', 'rapida', 'rápida', 'turbo']):
+        return f"Rápida ({display_val})" if display_val.lower() not in ['fast', 'high', 'rapida', 'rápida'] else "Rápida (Priorizar Velocidade)"
+    elif any(k in combined for k in ['slow', 'low', 'lenta', 'quiet', 'silent', 'silenciosa']):
+        return f"Lenta / Silenciosa ({display_val})" if display_val.lower() not in ['slow', 'low', 'quiet', 'silent'] else "Lenta / Silenciosa (Maior Precisão)"
+    elif any(k in combined for k in ['normal', 'standard', 'padrao', 'padrão', 'auto', 'default']):
+        return f"Normal ({display_val})" if display_val.lower() not in ['normal', 'standard', 'default'] else "Normal (Padrão)"
+    else:
+        return display_val if display_val != raw_val else raw_val
+
+
+def get_printer_speeds(printer_name, cups_server=""):
+    """
+    Obtém as opções de velocidade de impressão (PrintSpeed / Speed / QuietMode) disponíveis para a impressora.
+    Retorna uma lista de tuplas: (label_exibicao, dict_data, is_default)
+    onde dict_data = {"speed": "normal"|"fast"|"slow", "ppd_key": opt_key, "ppd_val": raw_val}
+    """
+    fallback_speeds = [
+        ("Normal (Padrão)", {"speed": "normal", "ppd_key": "", "ppd_val": "Normal"}, True),
+        ("Rápida (Priorizar Velocidade)", {"speed": "fast", "ppd_key": "", "ppd_val": "Fast"}, False),
+        ("Lenta / Silenciosa (Maior Precisão)", {"speed": "slow", "ppd_key": "", "ppd_val": "Slow"}, False),
+    ]
+
+    if not printer_name or printer_name == "Salvar como PDF":
+        return fallback_speeds
+
+    try:
+        cmd = ['lpoptions', '-p', printer_name, '-l']
+        env = os.environ.copy()
+        if cups_server:
+            cmd.extend(['-h', cups_server])
+            env["CUPS_SERVER"] = cups_server
+        else:
+            if "CUPS_SERVER" in env:
+                del env["CUPS_SERVER"]
+
+        output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, env=env, timeout=1.0)
+
+        speed_line = None
+        target_opt_key = None
+        for line in output.splitlines():
+            if ':' not in line:
+                continue
+            key_part, choices_part = line.split(':', 1)
+            opt_key_raw = key_part.split('/')[0].strip()
+            opt_key = opt_key_raw.lower()
+            if opt_key in ['printspeed', 'speed', 'cupsprintspeed', 'cupsspeed', 'quietmode', 'silentmode']:
+                speed_line = choices_part.strip()
+                target_opt_key = opt_key_raw
+                break
+
+        if not speed_line:
+            return fallback_speeds
+
+        choices = speed_line.split()
+        parsed = []
+        has_default = False
+
+        for choice in choices:
+            is_def = choice.startswith('*')
+            clean = choice.lstrip('*')
+
+            if '/' in clean:
+                raw_val, display_val = clean.split('/', 1)
+            else:
+                raw_val = display_val = clean
+
+            raw_lower = raw_val.lower()
+            disp_lower = display_val.lower()
+            combined = f"{raw_lower} {disp_lower}"
+
+            if any(k in combined for k in ['fast', 'high', 'rapida', 'rápida', 'turbo']):
+                speed_type = "fast"
+            elif any(k in combined for k in ['slow', 'low', 'lenta', 'quiet', 'silent', 'silenciosa', 'on']):
+                speed_type = "slow"
+            else:
+                speed_type = "normal"
+
+            label = format_speed_label(raw_val, display_val)
+
+            if is_def:
+                has_default = True
+
+            parsed.append((label, {"speed": speed_type, "ppd_key": target_opt_key, "ppd_val": raw_val}, is_def))
+
+        if parsed:
+            if not has_default and len(parsed) > 0:
+                l, d, _ = parsed[0]
+                parsed[0] = (l, d, True)
+            return parsed
+
+    except Exception:
+        pass
+
+    return fallback_speeds
+
+
 def parse_page_range(range_str, total_pages):
     """Converte uma string de intervalo (ex: '1-5, 8, 11-13') em uma lista ordenada de índices (0-indexed)."""
     if not range_str or not range_str.strip():
@@ -1001,7 +1100,7 @@ class PrintWorkerThread(QThread):
     progress = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, file_path, printer, copies, paper_size, orientation, scaling_mode, custom_scale, duplex, color, nup, poster, page_range, tray="Automática (Padrão)", save_path="", cups_server="", quality=None, media_type=None):
+    def __init__(self, file_path, printer, copies, paper_size, orientation, scaling_mode, custom_scale, duplex, color, nup, poster, page_range, tray="Automática (Padrão)", save_path="", cups_server="", quality=None, media_type=None, print_speed=None):
         super().__init__()
         self.file_path = file_path
         self.printer = printer
@@ -1014,6 +1113,7 @@ class PrintWorkerThread(QThread):
         self.color = color
         self.quality = quality
         self.media_type = media_type
+        self.print_speed = print_speed
         self.nup = nup
         self.poster = poster
         self.page_range = page_range
@@ -1215,6 +1315,30 @@ class PrintWorkerThread(QThread):
                             lp_args.extend(["-o", f"{ppd_key}={ppd_val}"])
                         elif ppd_val and ppd_val not in ["Plain", "stationery"]:
                             lp_args.extend(["-o", f"MediaType={ppd_val}"])
+
+                    if self.print_speed:
+                        speed_type = ""
+                        ppd_key = ""
+                        ppd_val = ""
+                        if isinstance(self.print_speed, dict):
+                            speed_type = self.print_speed.get("speed", "")
+                            ppd_key = self.print_speed.get("ppd_key", "")
+                            ppd_val = self.print_speed.get("ppd_val", "")
+                        else:
+                            s_str = str(self.print_speed).lower()
+                            if any(k in s_str for k in ["rapida", "rápida", "fast"]):
+                                speed_type = "fast"
+                            elif any(k in s_str for k in ["lenta", "slow", "quiet", "silenciosa"]):
+                                speed_type = "slow"
+                            else:
+                                speed_type = "normal"
+
+                        if ppd_key and ppd_val:
+                            lp_args.extend(["-o", f"{ppd_key}={ppd_val}"])
+                        elif speed_type == "fast":
+                            lp_args.extend(["-o", "PrintSpeed=Fast", "-o", "Speed=Fast"])
+                        elif speed_type == "slow":
+                            lp_args.extend(["-o", "PrintSpeed=Slow", "-o", "Speed=Slow", "-o", "QuietMode=On"])
 
                     lp_args.append(current_file)
                     subprocess.check_call(lp_args, env=get_clean_host_env())
@@ -1469,6 +1593,11 @@ class HistoryDialog(QDialog):
                 idx_q = self.main_app.cb_quality.findText(quality)
                 if idx_q >= 0:
                     self.main_app.cb_quality.setCurrentIndex(idx_q)
+            print_speed = entry.get("print_speed", "")
+            if print_speed and hasattr(self.main_app, "cb_print_speed"):
+                idx_s = self.main_app.cb_print_speed.findText(print_speed)
+                if idx_s >= 0:
+                    self.main_app.cb_print_speed.setCurrentIndex(idx_s)
             self.accept()
             QMessageBox.information(self, "Reimpressão", f"Arquivo '{os.path.basename(file_path)}' carregado com sucesso!")
         else:
@@ -1489,7 +1618,7 @@ class HistoryDialog(QDialog):
         if path:
             try:
                 with open(path, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=["timestamp", "filename", "file_path", "printer", "copies", "paper", "media_type", "quality", "color", "duplex", "status", "details"], extrasaction='ignore')
+                    writer = csv.DictWriter(f, fieldnames=["timestamp", "filename", "file_path", "printer", "copies", "paper", "media_type", "quality", "print_speed", "color", "duplex", "status", "details"], extrasaction='ignore')
                     writer.writeheader()
                     writer.writerows(self.history_data)
                 QMessageBox.information(self, "Sucesso", f"Histórico exportado para:\n{path}")
@@ -1581,6 +1710,11 @@ class SettingsDialog(QDialog):
         self.cb_default_quality.setCurrentText(self.settings.get("default_quality", "Normal (Padrão)"))
         layout_general.addRow("Qualidade de Impressão Padrão:", self.cb_default_quality)
 
+        self.cb_default_print_speed = QComboBox()
+        self.cb_default_print_speed.addItems(["Normal (Padrão)", "Rápida (Priorizar Velocidade)", "Lenta / Silenciosa (Maior Precisão)"])
+        self.cb_default_print_speed.setCurrentText(self.settings.get("default_print_speed", "Normal (Padrão)"))
+        layout_general.addRow("Velocidade de Impressão Padrão:", self.cb_default_print_speed)
+
         self.chk_keep_history = QCheckBox("Salvar histórico de arquivos impressos")
         self.chk_keep_history.setChecked(self.settings.get("keep_history", True))
         layout_general.addRow("Histórico:", self.chk_keep_history)
@@ -1665,6 +1799,7 @@ class SettingsDialog(QDialog):
         self.settings["default_paper"] = self.cb_default_paper.currentText()
         self.settings["default_media_type"] = self.cb_default_media_type.currentText()
         self.settings["default_quality"] = self.cb_default_quality.currentText()
+        self.settings["default_print_speed"] = self.cb_default_print_speed.currentText()
         self.settings["keep_history"] = self.chk_keep_history.isChecked()
         self.settings["max_history_entries"] = self.sp_max_history.value()
 
@@ -2336,6 +2471,10 @@ class PrintManagerApp(QMainWindow):
         self.cb_quality.currentIndexChanged.connect(self.on_setting_changed)
         form_opts.addRow("Qualidade de Impressão:", self.cb_quality)
 
+        self.cb_print_speed = QComboBox()
+        self.cb_print_speed.currentIndexChanged.connect(self.on_setting_changed)
+        form_opts.addRow("Velocidade de Impressão:", self.cb_print_speed)
+
         self.cb_nup = QComboBox()
         self.cb_nup.addItems(["1 por folha", "2 por folha", "4 por folha", "6 por folha", "9 por folha", "16 por folha"])
         self.cb_nup.currentIndexChanged.connect(self.on_nup_changed)
@@ -2351,7 +2490,7 @@ class PrintManagerApp(QMainWindow):
             self.cb_printers, self.sp_copies, self.txt_page_range,
             self.cb_paper_size, self.cb_media_type, self.cb_tray, self.cb_orientation,
             self.cb_scaling_mode, self.sp_custom_scale, self.cb_duplex,
-            self.cb_color, self.cb_quality, self.cb_nup, self.cb_poster
+            self.cb_color, self.cb_quality, self.cb_print_speed, self.cb_nup, self.cb_poster
         ]:
             widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -2635,6 +2774,28 @@ class PrintManagerApp(QMainWindow):
 
         self.cb_media_type.blockSignals(False)
 
+    def update_speeds(self, printer_name="", cups_server=""):
+        if not hasattr(self, 'cb_print_speed'):
+            return
+        self.cb_print_speed.blockSignals(True)
+        self.cb_print_speed.clear()
+
+        speeds = get_printer_speeds(printer_name, cups_server)
+        default_pref = self.settings.get("default_print_speed", "Normal (Padrão)")
+        default_index = 0
+
+        for i, (label, data_val, is_def) in enumerate(speeds):
+            self.cb_print_speed.addItem(label, data_val)
+            if default_pref and (default_pref.lower() in label.lower() or label.lower() in default_pref.lower()):
+                default_index = i
+            elif is_def and default_index == 0:
+                default_index = i
+
+        if self.cb_print_speed.count() > 0:
+            self.cb_print_speed.setCurrentIndex(default_index)
+
+        self.cb_print_speed.blockSignals(False)
+
     def on_printer_changed(self):
         if not hasattr(self, 'cb_color') or not hasattr(self, 'cb_printers'):
             return
@@ -2649,6 +2810,7 @@ class PrintManagerApp(QMainWindow):
             self.update_trays(printer, target_server)
             self.update_qualities(printer, target_server)
             self.update_media_types(printer, target_server)
+            self.update_speeds(printer, target_server)
             return
 
         if is_monochrome_printer(printer, target_server):
@@ -2662,6 +2824,7 @@ class PrintManagerApp(QMainWindow):
         self.update_trays(printer, target_server)
         self.update_qualities(printer, target_server)
         self.update_media_types(printer, target_server)
+        self.update_speeds(printer, target_server)
 
     def setup_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+O"), self, self.select_file)
@@ -2980,6 +3143,15 @@ class PrintManagerApp(QMainWindow):
             quality["label"] = quality_text
         else:
             quality = {"level": str(quality_data), "label": quality_text}
+        speed_data = self.cb_print_speed.currentData()
+        speed_text = self.cb_print_speed.currentText()
+        if not speed_data:
+            print_speed = {"speed": "normal", "label": speed_text, "ppd_val": "Normal"}
+        elif isinstance(speed_data, dict):
+            print_speed = dict(speed_data)
+            print_speed["label"] = speed_text
+        else:
+            print_speed = {"speed": "normal", "label": speed_text, "ppd_val": str(speed_data)}
         nup = self.cb_nup.currentText()
         poster = self.cb_poster.currentText()
         page_range = self.txt_page_range.text().strip()
@@ -3012,6 +3184,7 @@ class PrintManagerApp(QMainWindow):
             color=color,
             quality=quality,
             media_type=media_type,
+            print_speed=print_speed,
             nup=nup,
             poster=poster,
             page_range=page_range,
@@ -3044,6 +3217,7 @@ class PrintManagerApp(QMainWindow):
             "media_type": self.cb_media_type.currentText(),
             "color": self.cb_color.currentText(),
             "quality": self.cb_quality.currentText(),
+            "print_speed": self.cb_print_speed.currentText(),
             "duplex": self.cb_duplex.currentText(),
             "status": "Sucesso" if success else "Erro",
             "details": message
