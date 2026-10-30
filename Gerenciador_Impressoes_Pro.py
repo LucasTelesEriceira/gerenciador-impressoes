@@ -86,6 +86,7 @@ def load_settings():
         "cups_port": 631,
         "default_printer": "Salvar como PDF",
         "default_paper": "A4",
+        "default_media_type": "Papel Comum (Padrão)",
         "default_quality": "Normal (Padrão)",
         "keep_history": True,
         "max_history_entries": 100,
@@ -457,6 +458,135 @@ def get_printer_qualities(printer_name, cups_server=""):
         pass
 
     return fallback_qualities
+
+
+def format_media_type_label(raw_val, display_val):
+    combined = f"{raw_val} {display_val}".lower()
+    if any(k in combined for k in ['glossy', 'brilhante', 'brilhoso']):
+        return f"Papel Fotográfico Brilhoso ({display_val})" if display_val.lower() != 'glossy' else "Papel Fotográfico Brilhoso (Glossy)"
+    elif any(k in combined for k in ['matte', 'fosco']):
+        return f"Papel Fotográfico Fosco ({display_val})" if display_val.lower() != 'matte' else "Papel Fotográfico Fosco (Matte)"
+    elif any(k in combined for k in ['photo', 'foto', 'photographic']):
+        return f"Papel Fotográfico ({display_val})" if display_val.lower() not in ['photo', 'foto'] else "Papel Fotográfico (Foto)"
+    elif any(k in combined for k in ['recycled', 'reciclado']):
+        return "Papel Reciclado"
+    elif any(k in combined for k in ['cardstock', 'heavy', 'thick', 'cartao', 'cartão', 'grosso']):
+        return f"Papel Cartão / Grosso ({display_val})" if display_val.lower() not in ['cardstock', 'heavy', 'thick'] else "Papel Cartão / Grosso"
+    elif any(k in combined for k in ['label', 'etiqueta', 'adesivo']):
+        return "Etiquetas / Adesivo"
+    elif any(k in combined for k in ['envelope']):
+        return "Envelope"
+    elif any(k in combined for k in ['transparency', 'transparencia', 'transparência']):
+        return "Transparência"
+    elif any(k in combined for k in ['plain', 'stationery', 'comum', 'normal', 'padrao', 'padrão']):
+        return f"Papel Comum ({display_val})" if display_val.lower() not in ['plain', 'stationery'] else "Papel Comum (Padrão)"
+    else:
+        return display_val if display_val != raw_val else raw_val
+
+
+def map_media_type_to_ipp(raw_val, display_val):
+    combined = f"{raw_val} {display_val}".lower()
+    if any(k in combined for k in ['glossy', 'brilhante', 'brilhoso']):
+        return "photographic-glossy"
+    elif any(k in combined for k in ['matte', 'fosco']):
+        return "photographic-matte"
+    elif any(k in combined for k in ['photo', 'foto', 'photographic']):
+        return "photographic"
+    elif any(k in combined for k in ['recycled', 'reciclado']):
+        return "stationery-recycled"
+    elif any(k in combined for k in ['cardstock', 'heavy', 'thick', 'cartao', 'cartão', 'grosso']):
+        return "cardstock"
+    elif any(k in combined for k in ['label', 'etiqueta', 'adesivo']):
+        return "labels"
+    elif any(k in combined for k in ['envelope']):
+        return "envelope"
+    elif any(k in combined for k in ['transparency', 'transparencia', 'transparência']):
+        return "transparency"
+    return "stationery"
+
+
+def get_printer_media_types(printer_name, cups_server=""):
+    """
+    Obtém os tipos de papel/mídia (MediaType / media-type) disponíveis para a impressora informada.
+    Retorna uma lista de tuplas: (label_exibicao, dict_data, is_default)
+    onde dict_data = {"ipp": ipp_value, "ppd_key": opt_key, "ppd_val": raw_val}
+    """
+    fallback_media_types = [
+        ("Papel Comum (Padrão)", {"ipp": "stationery", "ppd_key": "", "ppd_val": "Plain"}, True),
+        ("Papel Fotográfico Brilhoso (Glossy)", {"ipp": "photographic-glossy", "ppd_key": "", "ppd_val": "Glossy"}, False),
+        ("Papel Fotográfico Fosco (Matte)", {"ipp": "photographic-matte", "ppd_key": "", "ppd_val": "Matte"}, False),
+        ("Papel Fotográfico (Foto)", {"ipp": "photographic", "ppd_key": "", "ppd_val": "Photo"}, False),
+        ("Papel Reciclado", {"ipp": "stationery-recycled", "ppd_key": "", "ppd_val": "Recycled"}, False),
+        ("Papel Cartão / Grosso", {"ipp": "cardstock", "ppd_key": "", "ppd_val": "Cardstock"}, False),
+        ("Etiquetas / Adesivo", {"ipp": "labels", "ppd_key": "", "ppd_val": "Labels"}, False),
+        ("Envelope", {"ipp": "envelope", "ppd_key": "", "ppd_val": "Envelope"}, False),
+        ("Transparência", {"ipp": "transparency", "ppd_key": "", "ppd_val": "Transparency"}, False)
+    ]
+
+    if not printer_name or printer_name == "Salvar como PDF":
+        return fallback_media_types
+
+    try:
+        cmd = ['lpoptions', '-p', printer_name, '-l']
+        env = os.environ.copy()
+        if cups_server:
+            cmd.extend(['-h', cups_server])
+            env["CUPS_SERVER"] = cups_server
+        else:
+            if "CUPS_SERVER" in env:
+                del env["CUPS_SERVER"]
+
+        output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, env=env, timeout=1.0)
+
+        media_line = None
+        target_opt_key = None
+        for line in output.splitlines():
+            if ':' not in line:
+                continue
+            key_part, choices_part = line.split(':', 1)
+            opt_key_raw = key_part.split('/')[0].strip()
+            opt_key = opt_key_raw.lower()
+            if opt_key in ['mediatype', 'media-type', 'papertype', 'paper-type', 'media']:
+                if opt_key == 'media' and any(s in choices_part.lower() for s in ['a4', 'letter', 'legal']):
+                    continue
+                media_line = choices_part.strip()
+                target_opt_key = opt_key_raw
+                break
+
+        if not media_line:
+            return fallback_media_types
+
+        choices = media_line.split()
+        parsed = []
+        has_default = False
+
+        for choice in choices:
+            is_def = choice.startswith('*')
+            clean = choice.lstrip('*')
+
+            if '/' in clean:
+                raw_val, display_val = clean.split('/', 1)
+            else:
+                raw_val = display_val = clean
+
+            label = format_media_type_label(raw_val, display_val)
+            ipp_val = map_media_type_to_ipp(raw_val, display_val)
+
+            if is_def:
+                has_default = True
+
+            parsed.append((label, {"ipp": ipp_val, "ppd_key": target_opt_key, "ppd_val": raw_val}, is_def))
+
+        if parsed:
+            if not has_default and len(parsed) > 0:
+                l, d, _ = parsed[0]
+                parsed[0] = (l, d, True)
+            return parsed
+
+    except Exception:
+        pass
+
+    return fallback_media_types
 
 
 def parse_page_range(range_str, total_pages):
@@ -871,7 +1001,7 @@ class PrintWorkerThread(QThread):
     progress = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, file_path, printer, copies, paper_size, orientation, scaling_mode, custom_scale, duplex, color, nup, poster, page_range, tray="Automática (Padrão)", save_path="", cups_server="", quality=None):
+    def __init__(self, file_path, printer, copies, paper_size, orientation, scaling_mode, custom_scale, duplex, color, nup, poster, page_range, tray="Automática (Padrão)", save_path="", cups_server="", quality=None, media_type=None):
         super().__init__()
         self.file_path = file_path
         self.printer = printer
@@ -883,6 +1013,7 @@ class PrintWorkerThread(QThread):
         self.duplex = duplex
         self.color = color
         self.quality = quality
+        self.media_type = media_type
         self.nup = nup
         self.poster = poster
         self.page_range = page_range
@@ -1064,6 +1195,27 @@ class PrintWorkerThread(QThread):
                     media_map = {"A4": "A4", "Carta (Letter)": "Letter", "A3": "A3", "A5": "A5", "Ofício (Legal)": "Legal"}
                     media_name = media_map.get(self.paper_size, "A4")
                     lp_args.extend(["-o", f"media={media_name}"])
+
+                    if self.media_type:
+                        ipp_type = ""
+                        ppd_key = ""
+                        ppd_val = ""
+                        if isinstance(self.media_type, dict):
+                            ipp_type = self.media_type.get("ipp", "")
+                            ppd_key = self.media_type.get("ppd_key", "")
+                            ppd_val = self.media_type.get("ppd_val", "")
+                        else:
+                            raw_str = str(self.media_type)
+                            ipp_type = map_media_type_to_ipp(raw_str, raw_str)
+                            ppd_val = raw_str
+
+                        if ipp_type:
+                            lp_args.extend(["-o", f"media-type={ipp_type}"])
+                        if ppd_key and ppd_val:
+                            lp_args.extend(["-o", f"{ppd_key}={ppd_val}"])
+                        elif ppd_val and ppd_val not in ["Plain", "stationery"]:
+                            lp_args.extend(["-o", f"MediaType={ppd_val}"])
+
                     lp_args.append(current_file)
                     subprocess.check_call(lp_args, env=get_clean_host_env())
                     self.finished_signal.emit(True, f"Enviado com sucesso para a impressora '{self.printer}'!")
@@ -1241,8 +1393,8 @@ class HistoryDialog(QDialog):
         layout.setSpacing(10)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(["Data/Hora", "Arquivo", "Impressora", "Cópias", "Papel", "Qualidade", "Status"])
+        self.table.setColumnCount(8)
+        self.table.setHorizontalHeaderLabels(["Data/Hora", "Arquivo", "Impressora", "Cópias", "Papel", "Tipo de Papel", "Qualidade", "Status"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -1283,14 +1435,15 @@ class HistoryDialog(QDialog):
             self.table.setItem(row, 2, QTableWidgetItem(entry.get("printer", "")))
             self.table.setItem(row, 3, QTableWidgetItem(str(entry.get("copies", 1))))
             self.table.setItem(row, 4, QTableWidgetItem(entry.get("paper", "")))
-            self.table.setItem(row, 5, QTableWidgetItem(entry.get("quality", "Normal (Padrão)")))
+            self.table.setItem(row, 5, QTableWidgetItem(entry.get("media_type", "Papel Comum (Padrão)")))
+            self.table.setItem(row, 6, QTableWidgetItem(entry.get("quality", "Normal (Padrão)")))
 
             status_item = QTableWidgetItem(entry.get("status", ""))
             if entry.get("status") == "Sucesso":
                 status_item.setForeground(Qt.darkGreen)
             else:
                 status_item.setForeground(Qt.red)
-            self.table.setItem(row, 6, status_item)
+            self.table.setItem(row, 7, status_item)
 
     def reprint_selected(self):
         selected_rows = self.table.selectedItems()
@@ -1306,6 +1459,11 @@ class HistoryDialog(QDialog):
             idx = self.main_app.cb_printers.findText(printer)
             if idx >= 0:
                 self.main_app.cb_printers.setCurrentIndex(idx)
+            media_type = entry.get("media_type", "")
+            if media_type and hasattr(self.main_app, "cb_media_type"):
+                idx_m = self.main_app.cb_media_type.findText(media_type)
+                if idx_m >= 0:
+                    self.main_app.cb_media_type.setCurrentIndex(idx_m)
             quality = entry.get("quality", "")
             if quality and hasattr(self.main_app, "cb_quality"):
                 idx_q = self.main_app.cb_quality.findText(quality)
@@ -1331,7 +1489,7 @@ class HistoryDialog(QDialog):
         if path:
             try:
                 with open(path, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=["timestamp", "filename", "file_path", "printer", "copies", "paper", "quality", "color", "duplex", "status", "details"], extrasaction='ignore')
+                    writer = csv.DictWriter(f, fieldnames=["timestamp", "filename", "file_path", "printer", "copies", "paper", "media_type", "quality", "color", "duplex", "status", "details"], extrasaction='ignore')
                     writer.writeheader()
                     writer.writerows(self.history_data)
                 QMessageBox.information(self, "Sucesso", f"Histórico exportado para:\n{path}")
@@ -1402,6 +1560,21 @@ class SettingsDialog(QDialog):
         self.cb_default_paper.addItems(["A4", "Carta (Letter)", "A3", "A5", "Ofício (Legal)"])
         self.cb_default_paper.setCurrentText(self.settings.get("default_paper", "A4"))
         layout_general.addRow("Tamanho de Papel Padrão:", self.cb_default_paper)
+
+        self.cb_default_media_type = QComboBox()
+        self.cb_default_media_type.addItems([
+            "Papel Comum (Padrão)",
+            "Papel Fotográfico Brilhoso (Glossy)",
+            "Papel Fotográfico Fosco (Matte)",
+            "Papel Fotográfico (Foto)",
+            "Papel Reciclado",
+            "Papel Cartão / Grosso",
+            "Etiquetas / Adesivo",
+            "Envelope",
+            "Transparência"
+        ])
+        self.cb_default_media_type.setCurrentText(self.settings.get("default_media_type", "Papel Comum (Padrão)"))
+        layout_general.addRow("Tipo de Papel Padrão:", self.cb_default_media_type)
 
         self.cb_default_quality = QComboBox()
         self.cb_default_quality.addItems(["Normal (Padrão)", "Rascunho (Econômico / Rápido)", "Alta Qualidade (Foto / Nítido)"])
@@ -1490,6 +1663,7 @@ class SettingsDialog(QDialog):
         self.settings["cups_server"] = self.txt_cups_server.text().strip()
         self.settings["cups_port"] = self.sp_cups_port.value()
         self.settings["default_paper"] = self.cb_default_paper.currentText()
+        self.settings["default_media_type"] = self.cb_default_media_type.currentText()
         self.settings["default_quality"] = self.cb_default_quality.currentText()
         self.settings["keep_history"] = self.chk_keep_history.isChecked()
         self.settings["max_history_entries"] = self.sp_max_history.value()
@@ -2125,6 +2299,10 @@ class PrintManagerApp(QMainWindow):
         self.cb_paper_size.currentIndexChanged.connect(self.on_setting_changed)
         form_opts.addRow("Tamanho do Papel:", self.cb_paper_size)
 
+        self.cb_media_type = QComboBox()
+        self.cb_media_type.currentIndexChanged.connect(self.on_setting_changed)
+        form_opts.addRow("Tipo de Papel:", self.cb_media_type)
+
         self.cb_tray = QComboBox()
         form_opts.addRow("Bandeja de Entrada:", self.cb_tray)
 
@@ -2171,7 +2349,7 @@ class PrintManagerApp(QMainWindow):
         # Política de expansão uniforme para que TODOS os inputs tenham a mesma largura perfeita
         for widget in [
             self.cb_printers, self.sp_copies, self.txt_page_range,
-            self.cb_paper_size, self.cb_tray, self.cb_orientation,
+            self.cb_paper_size, self.cb_media_type, self.cb_tray, self.cb_orientation,
             self.cb_scaling_mode, self.sp_custom_scale, self.cb_duplex,
             self.cb_color, self.cb_quality, self.cb_nup, self.cb_poster
         ]:
@@ -2435,6 +2613,28 @@ class PrintManagerApp(QMainWindow):
 
         self.cb_quality.blockSignals(False)
 
+    def update_media_types(self, printer_name="", cups_server=""):
+        if not hasattr(self, 'cb_media_type'):
+            return
+        self.cb_media_type.blockSignals(True)
+        self.cb_media_type.clear()
+
+        media_types = get_printer_media_types(printer_name, cups_server)
+        default_pref = self.settings.get("default_media_type", "Papel Comum (Padrão)")
+        default_index = 0
+
+        for i, (label, data_val, is_def) in enumerate(media_types):
+            self.cb_media_type.addItem(label, data_val)
+            if default_pref and (default_pref.lower() in label.lower() or label.lower() in default_pref.lower()):
+                default_index = i
+            elif is_def and default_index == 0:
+                default_index = i
+
+        if self.cb_media_type.count() > 0:
+            self.cb_media_type.setCurrentIndex(default_index)
+
+        self.cb_media_type.blockSignals(False)
+
     def on_printer_changed(self):
         if not hasattr(self, 'cb_color') or not hasattr(self, 'cb_printers'):
             return
@@ -2448,6 +2648,7 @@ class PrintManagerApp(QMainWindow):
             self.cb_color.setToolTip("Selecione o modo de cor")
             self.update_trays(printer, target_server)
             self.update_qualities(printer, target_server)
+            self.update_media_types(printer, target_server)
             return
 
         if is_monochrome_printer(printer, target_server):
@@ -2460,6 +2661,7 @@ class PrintManagerApp(QMainWindow):
 
         self.update_trays(printer, target_server)
         self.update_qualities(printer, target_server)
+        self.update_media_types(printer, target_server)
 
     def setup_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+O"), self, self.select_file)
@@ -2754,6 +2956,15 @@ class PrintManagerApp(QMainWindow):
         printer = self.cb_printers.currentText()
         copies = self.sp_copies.value()
         paper_size = self.cb_paper_size.currentText()
+        media_type_data = self.cb_media_type.currentData()
+        media_type_text = self.cb_media_type.currentText()
+        if not media_type_data:
+            media_type = {"ipp": "stationery", "label": media_type_text, "ppd_val": "Plain"}
+        elif isinstance(media_type_data, dict):
+            media_type = dict(media_type_data)
+            media_type["label"] = media_type_text
+        else:
+            media_type = {"ipp": "stationery", "label": media_type_text, "ppd_val": str(media_type_data)}
         tray = self.cb_tray.currentData() or self.cb_tray.currentText()
         orientation = self.cb_orientation.currentText()
         scaling_mode = self.cb_scaling_mode.currentText()
@@ -2800,6 +3011,7 @@ class PrintManagerApp(QMainWindow):
             duplex=duplex,
             color=color,
             quality=quality,
+            media_type=media_type,
             nup=nup,
             poster=poster,
             page_range=page_range,
@@ -2829,6 +3041,7 @@ class PrintManagerApp(QMainWindow):
             "printer": self.cb_printers.currentText(),
             "copies": self.sp_copies.value(),
             "paper": self.cb_paper_size.currentText(),
+            "media_type": self.cb_media_type.currentText(),
             "color": self.cb_color.currentText(),
             "quality": self.cb_quality.currentText(),
             "duplex": self.cb_duplex.currentText(),
