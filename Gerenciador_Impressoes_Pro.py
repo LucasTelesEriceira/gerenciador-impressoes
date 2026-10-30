@@ -86,6 +86,7 @@ def load_settings():
         "cups_port": 631,
         "default_printer": "Salvar como PDF",
         "default_paper": "A4",
+        "default_quality": "Normal (Padrão)",
         "keep_history": True,
         "max_history_entries": 100,
         "script_url": "https://raw.githubusercontent.com/LucasTelesEriceira/gerenciador-impressoes/main/instalar_impressoras.sh"
@@ -367,6 +368,95 @@ def get_printer_trays(printer_name, cups_server=""):
         pass
 
     return fallback_trays
+
+
+def get_printer_qualities(printer_name, cups_server=""):
+    """
+    Obtém as opções de qualidade de impressão para a impressora informada.
+    Retorna uma lista de tuplas: (label_exibicao, dict_data, is_default)
+    onde dict_data = {"level": "normal"|"draft"|"high", "ppd_key": opt_key, "ppd_val": raw_val}
+    """
+    fallback_qualities = [
+        ("Normal (Padrão)", {"level": "normal", "ppd_key": "", "ppd_val": ""}, True),
+        ("Rascunho (Econômico / Rápido)", {"level": "draft", "ppd_key": "", "ppd_val": ""}, False),
+        ("Alta Qualidade (Foto / Nítido)", {"level": "high", "ppd_key": "", "ppd_val": ""}, False),
+    ]
+
+    if not printer_name or printer_name == "Salvar como PDF":
+        return fallback_qualities
+
+    try:
+        cmd = ['lpoptions', '-p', printer_name, '-l']
+        env = os.environ.copy()
+        if cups_server:
+            cmd.extend(['-h', cups_server])
+            env["CUPS_SERVER"] = cups_server
+        else:
+            if "CUPS_SERVER" in env:
+                del env["CUPS_SERVER"]
+
+        output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, env=env, timeout=1.0)
+
+        quality_line = None
+        target_opt_key = None
+        for line in output.splitlines():
+            if ':' not in line:
+                continue
+            key_part, choices_part = line.split(':', 1)
+            opt_key_raw = key_part.split('/')[0].strip()
+            opt_key = opt_key_raw.lower()
+            if opt_key in ['cupsprintquality', 'printquality', 'print-quality', 'outputmode', 'quality']:
+                quality_line = choices_part.strip()
+                target_opt_key = opt_key_raw
+                break
+
+        if not quality_line:
+            return fallback_qualities
+
+        choices = quality_line.split()
+        parsed = []
+        has_default = False
+
+        for choice in choices:
+            is_def = choice.startswith('*')
+            clean = choice.lstrip('*')
+
+            if '/' in clean:
+                raw_val, display_val = clean.split('/', 1)
+            else:
+                raw_val = display_val = clean
+
+            raw_lower = raw_val.lower()
+            disp_lower = display_val.lower()
+
+            if any(k in raw_lower or k in disp_lower for k in ['draft', 'fast', 'rascunho', 'economic', 'economico']):
+                level = "draft"
+                label = f"Rascunho ({display_val})" if display_val.lower() not in ["draft", "rascunho"] else "Rascunho (Econômico / Rápido)"
+            elif any(k in raw_lower or k in disp_lower for k in ['high', 'best', 'photo', 'fine', 'alta', 'otima', 'ótima']):
+                level = "high"
+                label = f"Alta Qualidade ({display_val})" if display_val.lower() not in ["high", "best"] else "Alta Qualidade (Foto / Nítido)"
+            elif any(k in raw_lower or k in disp_lower for k in ['normal', 'standard', 'padrao', 'padrão']):
+                level = "normal"
+                label = f"Normal ({display_val})" if display_val.lower() not in ["normal", "standard"] else "Normal (Padrão)"
+            else:
+                level = "normal"
+                label = display_val
+
+            if is_def:
+                has_default = True
+
+            parsed.append((label, {"level": level, "ppd_key": target_opt_key, "ppd_val": raw_val}, is_def))
+
+        if parsed:
+            if not has_default and len(parsed) > 0:
+                l, d, _ = parsed[0]
+                parsed[0] = (l, d, True)
+            return parsed
+
+    except Exception:
+        pass
+
+    return fallback_qualities
 
 
 def parse_page_range(range_str, total_pages):
@@ -781,7 +871,7 @@ class PrintWorkerThread(QThread):
     progress = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, file_path, printer, copies, paper_size, orientation, scaling_mode, custom_scale, duplex, color, nup, poster, page_range, tray="Automática (Padrão)", save_path="", cups_server=""):
+    def __init__(self, file_path, printer, copies, paper_size, orientation, scaling_mode, custom_scale, duplex, color, nup, poster, page_range, tray="Automática (Padrão)", save_path="", cups_server="", quality=None):
         super().__init__()
         self.file_path = file_path
         self.printer = printer
@@ -792,6 +882,7 @@ class PrintWorkerThread(QThread):
         self.custom_scale = custom_scale
         self.duplex = duplex
         self.color = color
+        self.quality = quality
         self.nup = nup
         self.poster = poster
         self.page_range = page_range
@@ -931,6 +1022,30 @@ class PrintWorkerThread(QThread):
                         lp_args.extend(["-o", "print-color-mode=monochrome", "-o", "ColorModel=Gray"])
                     else:
                         lp_args.extend(["-o", "print-color-mode=color"])
+
+                    if self.quality:
+                        level = self.quality.get("level") if isinstance(self.quality, dict) else ""
+                        if not level:
+                            q_str = str(self.quality).lower()
+                            if any(k in q_str for k in ["rascunho", "draft"]):
+                                level = "draft"
+                            elif any(k in q_str for k in ["alta", "high", "best", "foto", "ótima", "otima"]):
+                                level = "high"
+                            else:
+                                level = "normal"
+
+                        if level == "draft":
+                            lp_args.extend(["-o", "print-quality=3"])
+                        elif level == "high":
+                            lp_args.extend(["-o", "print-quality=5"])
+                        else:
+                            lp_args.extend(["-o", "print-quality=4"])
+
+                        if isinstance(self.quality, dict):
+                            ppd_key = self.quality.get("ppd_key")
+                            ppd_val = self.quality.get("ppd_val")
+                            if ppd_key and ppd_val:
+                                lp_args.extend(["-o", f"{ppd_key}={ppd_val}"])
 
                     if self.tray and self.tray != "Automática (Padrão)" and self.tray != "Auto":
                         if "Bandeja 1" in self.tray or self.tray in ["Tray1", "tray-1", "TRAY1"]:
@@ -1126,8 +1241,8 @@ class HistoryDialog(QDialog):
         layout.setSpacing(10)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["Data/Hora", "Arquivo", "Impressora", "Cópias", "Papel", "Status"])
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["Data/Hora", "Arquivo", "Impressora", "Cópias", "Papel", "Qualidade", "Status"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -1168,13 +1283,14 @@ class HistoryDialog(QDialog):
             self.table.setItem(row, 2, QTableWidgetItem(entry.get("printer", "")))
             self.table.setItem(row, 3, QTableWidgetItem(str(entry.get("copies", 1))))
             self.table.setItem(row, 4, QTableWidgetItem(entry.get("paper", "")))
+            self.table.setItem(row, 5, QTableWidgetItem(entry.get("quality", "Normal (Padrão)")))
 
             status_item = QTableWidgetItem(entry.get("status", ""))
             if entry.get("status") == "Sucesso":
                 status_item.setForeground(Qt.darkGreen)
             else:
                 status_item.setForeground(Qt.red)
-            self.table.setItem(row, 5, status_item)
+            self.table.setItem(row, 6, status_item)
 
     def reprint_selected(self):
         selected_rows = self.table.selectedItems()
@@ -1190,6 +1306,11 @@ class HistoryDialog(QDialog):
             idx = self.main_app.cb_printers.findText(printer)
             if idx >= 0:
                 self.main_app.cb_printers.setCurrentIndex(idx)
+            quality = entry.get("quality", "")
+            if quality and hasattr(self.main_app, "cb_quality"):
+                idx_q = self.main_app.cb_quality.findText(quality)
+                if idx_q >= 0:
+                    self.main_app.cb_quality.setCurrentIndex(idx_q)
             self.accept()
             QMessageBox.information(self, "Reimpressão", f"Arquivo '{os.path.basename(file_path)}' carregado com sucesso!")
         else:
@@ -1210,7 +1331,7 @@ class HistoryDialog(QDialog):
         if path:
             try:
                 with open(path, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=["timestamp", "filename", "file_path", "printer", "copies", "paper", "color", "duplex", "status", "details"])
+                    writer = csv.DictWriter(f, fieldnames=["timestamp", "filename", "file_path", "printer", "copies", "paper", "quality", "color", "duplex", "status", "details"], extrasaction='ignore')
                     writer.writeheader()
                     writer.writerows(self.history_data)
                 QMessageBox.information(self, "Sucesso", f"Histórico exportado para:\n{path}")
@@ -1281,6 +1402,11 @@ class SettingsDialog(QDialog):
         self.cb_default_paper.addItems(["A4", "Carta (Letter)", "A3", "A5", "Ofício (Legal)"])
         self.cb_default_paper.setCurrentText(self.settings.get("default_paper", "A4"))
         layout_general.addRow("Tamanho de Papel Padrão:", self.cb_default_paper)
+
+        self.cb_default_quality = QComboBox()
+        self.cb_default_quality.addItems(["Normal (Padrão)", "Rascunho (Econômico / Rápido)", "Alta Qualidade (Foto / Nítido)"])
+        self.cb_default_quality.setCurrentText(self.settings.get("default_quality", "Normal (Padrão)"))
+        layout_general.addRow("Qualidade de Impressão Padrão:", self.cb_default_quality)
 
         self.chk_keep_history = QCheckBox("Salvar histórico de arquivos impressos")
         self.chk_keep_history.setChecked(self.settings.get("keep_history", True))
@@ -1364,6 +1490,7 @@ class SettingsDialog(QDialog):
         self.settings["cups_server"] = self.txt_cups_server.text().strip()
         self.settings["cups_port"] = self.sp_cups_port.value()
         self.settings["default_paper"] = self.cb_default_paper.currentText()
+        self.settings["default_quality"] = self.cb_default_quality.currentText()
         self.settings["keep_history"] = self.chk_keep_history.isChecked()
         self.settings["max_history_entries"] = self.sp_max_history.value()
 
@@ -2027,6 +2154,10 @@ class PrintManagerApp(QMainWindow):
         self.cb_color.addItems(["Colorido (Padrão)", "Preto e Branco"])
         form_opts.addRow("Cores:", self.cb_color)
 
+        self.cb_quality = QComboBox()
+        self.cb_quality.currentIndexChanged.connect(self.on_setting_changed)
+        form_opts.addRow("Qualidade de Impressão:", self.cb_quality)
+
         self.cb_nup = QComboBox()
         self.cb_nup.addItems(["1 por folha", "2 por folha", "4 por folha", "6 por folha", "9 por folha", "16 por folha"])
         self.cb_nup.currentIndexChanged.connect(self.on_nup_changed)
@@ -2042,7 +2173,7 @@ class PrintManagerApp(QMainWindow):
             self.cb_printers, self.sp_copies, self.txt_page_range,
             self.cb_paper_size, self.cb_tray, self.cb_orientation,
             self.cb_scaling_mode, self.sp_custom_scale, self.cb_duplex,
-            self.cb_color, self.cb_nup, self.cb_poster
+            self.cb_color, self.cb_quality, self.cb_nup, self.cb_poster
         ]:
             widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -2282,6 +2413,28 @@ class PrintManagerApp(QMainWindow):
 
         self.cb_tray.blockSignals(False)
 
+    def update_qualities(self, printer_name="", cups_server=""):
+        if not hasattr(self, 'cb_quality'):
+            return
+        self.cb_quality.blockSignals(True)
+        self.cb_quality.clear()
+
+        qualities = get_printer_qualities(printer_name, cups_server)
+        default_pref = self.settings.get("default_quality", "Normal (Padrão)")
+        default_index = 0
+
+        for i, (label, data_val, is_def) in enumerate(qualities):
+            self.cb_quality.addItem(label, data_val)
+            if default_pref and (default_pref.lower() in label.lower() or label.lower() in default_pref.lower()):
+                default_index = i
+            elif is_def and default_index == 0:
+                default_index = i
+
+        if self.cb_quality.count() > 0:
+            self.cb_quality.setCurrentIndex(default_index)
+
+        self.cb_quality.blockSignals(False)
+
     def on_printer_changed(self):
         if not hasattr(self, 'cb_color') or not hasattr(self, 'cb_printers'):
             return
@@ -2294,6 +2447,7 @@ class PrintManagerApp(QMainWindow):
             self.cb_color.setEnabled(True)
             self.cb_color.setToolTip("Selecione o modo de cor")
             self.update_trays(printer, target_server)
+            self.update_qualities(printer, target_server)
             return
 
         if is_monochrome_printer(printer, target_server):
@@ -2305,6 +2459,7 @@ class PrintManagerApp(QMainWindow):
             self.cb_color.setToolTip("Selecione o modo de cor")
 
         self.update_trays(printer, target_server)
+        self.update_qualities(printer, target_server)
 
     def setup_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+O"), self, self.select_file)
@@ -2605,6 +2760,15 @@ class PrintManagerApp(QMainWindow):
         custom_scale = self.sp_custom_scale.value()
         duplex = self.cb_duplex.currentText()
         color = self.cb_color.currentText()
+        quality_data = self.cb_quality.currentData()
+        quality_text = self.cb_quality.currentText()
+        if not quality_data:
+            quality = {"level": "normal", "label": quality_text}
+        elif isinstance(quality_data, dict):
+            quality = dict(quality_data)
+            quality["label"] = quality_text
+        else:
+            quality = {"level": str(quality_data), "label": quality_text}
         nup = self.cb_nup.currentText()
         poster = self.cb_poster.currentText()
         page_range = self.txt_page_range.text().strip()
@@ -2635,6 +2799,7 @@ class PrintManagerApp(QMainWindow):
             custom_scale=custom_scale,
             duplex=duplex,
             color=color,
+            quality=quality,
             nup=nup,
             poster=poster,
             page_range=page_range,
@@ -2665,6 +2830,7 @@ class PrintManagerApp(QMainWindow):
             "copies": self.sp_copies.value(),
             "paper": self.cb_paper_size.currentText(),
             "color": self.cb_color.currentText(),
+            "quality": self.cb_quality.currentText(),
             "duplex": self.cb_duplex.currentText(),
             "status": "Sucesso" if success else "Erro",
             "details": message
