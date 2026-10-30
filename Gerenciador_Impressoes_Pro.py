@@ -33,7 +33,7 @@ if "SSL_CERT_FILE" not in os.environ:
             os.environ["SSL_CERT_FILE"] = _ca_bundle
             break
 
-CURRENT_VERSION = "v1.3.2"
+CURRENT_VERSION = "v1.3.3"
 SETTINGS_DIR = os.path.expanduser("~/.config/gerenciador_impressoes_pro")
 SETTINGS_FILE = os.path.join(SETTINGS_DIR, "settings.json")
 HISTORY_FILE = os.path.join(SETTINGS_DIR, "history.json")
@@ -1072,6 +1072,8 @@ class UpdateDownloadThread(QThread):
                     self.progress.emit(downloaded, total_size)
 
             if not self._is_cancelled:
+                if total_size > 0 and downloaded < total_size:
+                    raise Exception(f"Download incompleto ({downloaded} de {total_size} bytes baixados).")
                 self.finished.emit(self.dest_path)
         except Exception as e:
             self.error.emit(str(e))
@@ -2823,10 +2825,24 @@ class PrintManagerApp(QMainWindow):
             self.lbl_status.setText("Atualização cancelada.")
 
         def on_finished(downloaded_file):
+            try:
+                progress_dlg.canceled.disconnect(on_cancelled)
+            except Exception:
+                pass
             progress_dlg.close()
             try:
+                if not os.path.exists(downloaded_file):
+                    raise FileNotFoundError(f"Arquivo de atualização temporário não encontrado: {downloaded_file}")
+
                 if is_linux:
-                    os.replace(downloaded_file, current_appimage)
+                    try:
+                        os.replace(downloaded_file, current_appimage)
+                    except OSError:
+                        shutil.copyfile(downloaded_file, current_appimage)
+                        try:
+                            os.remove(downloaded_file)
+                        except Exception:
+                            pass
                     os.chmod(current_appimage, 0o755)
                     QMessageBox.information(
                         self, "Atualização Concluída",
@@ -2856,6 +2872,10 @@ del "%~f0"
                 QMessageBox.critical(self, "Erro ao Aplicar Atualização", f"Falha ao substituir o arquivo executável:\n{str(ex)}")
 
         def on_error(err_msg):
+            try:
+                progress_dlg.canceled.disconnect(on_cancelled)
+            except Exception:
+                pass
             progress_dlg.close()
             try:
                 if os.path.exists(dest_tmp):
