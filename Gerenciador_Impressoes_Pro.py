@@ -33,7 +33,7 @@ if "SSL_CERT_FILE" not in os.environ:
             os.environ["SSL_CERT_FILE"] = _ca_bundle
             break
 
-CURRENT_VERSION = "v1.3.3"
+CURRENT_VERSION = "v1.3.4"
 SETTINGS_DIR = os.path.expanduser("~/.config/gerenciador_impressoes_pro")
 SETTINGS_FILE = os.path.join(SETTINGS_DIR, "settings.json")
 HISTORY_FILE = os.path.join(SETTINGS_DIR, "history.json")
@@ -2215,7 +2215,10 @@ class AboutDialog(QDialog):
             "<p align='center'>Solução completa e de alta performance para gerenciamento e preparação de impressão no Linux e Windows.</p>"
             "<hr>"
             "<b>Destaques da Versão " + CURRENT_VERSION + ":</b><br>"
-            "• Suporte a PDF, Word (DOCX/DOC), LibreOffice (ODT), Planilhas (XLSX/XLS/ODS/CSV), Apresentações (PPTX/PPT/ODP) e Texto<br>"
+            "• Seleção de Qualidade de Impressão (Normal, Rascunho, Alta / Foto) integrada ao CUPS e IPP<br>"
+            "• Seleção de Tipo de Papel (Comum, Fotográfico Glossy/Matte, Reciclado, Cartão, Etiquetas, Envelope)<br>"
+            "• Controle de Velocidade de Impressão (Normal, Rápida, Lenta / Silenciosa)<br>"
+            "• Suporte a PDF, Word (DOCX/DOC), LibreOffice (ODT), Planilhas (XLSX/ODS/CSV), Apresentações (PPTX/ODP)<br>"
             "• Integração nativa com o sistema ('Abrir com...') e lançadores de aplicativos<br>"
             "• Pré-visualização ultra-rápida (QThread + pdftoppm)<br>"
             "• Suporte a N-Up (slides por folha) e Modo Cartaz (Pôster)<br>"
