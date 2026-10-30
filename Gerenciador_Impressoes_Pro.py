@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QMainWindow, QVBoxLayout, QH
                              QScrollArea, QSplitter, QProgressBar, QFrame, QShortcut,
                              QMenuBar, QMenu, QAction, QDialog, QTableWidget, QTableWidgetItem,
                              QHeaderView, QTextEdit, QCheckBox, QDialogButtonBox, QTabWidget,
-                             QProgressDialog)
+                             QProgressDialog, QSizePolicy)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QProcess, QUrl
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QPalette, QIcon, QDesktopServices
 from PyQt5.QtPrintSupport import QPrinterInfo
@@ -33,7 +33,7 @@ if "SSL_CERT_FILE" not in os.environ:
             os.environ["SSL_CERT_FILE"] = _ca_bundle
             break
 
-CURRENT_VERSION = "v1.3.0"
+CURRENT_VERSION = "v1.3.1"
 SETTINGS_DIR = os.path.expanduser("~/.config/gerenciador_impressoes_pro")
 SETTINGS_FILE = os.path.join(SETTINGS_DIR, "settings.json")
 HISTORY_FILE = os.path.join(SETTINGS_DIR, "history.json")
@@ -139,7 +139,7 @@ def get_system_printers(cups_server="", cups_port=631):
             try:
                 env = os.environ.copy()
                 env["CUPS_SERVER"] = target
-                output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, env=env)
+                output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, env=env, timeout=1.0)
                 for line in output.strip().split('\n'):
                     if line and not line.startswith('lpstat:'):
                         name = line.split()[0].strip()
@@ -157,7 +157,7 @@ def get_system_printers(cups_server="", cups_port=631):
 
     for cmd in [['lpstat', '-e'], ['lpstat', '-a'], ['lpstat', '-p']]:
         try:
-            output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, env=env_local)
+            output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, env=env_local, timeout=1.0)
             for line in output.strip().split('\n'):
                 if line and not line.startswith('lpstat:'):
                     if len(cmd) > 1 and cmd[1] == '-p':
@@ -187,6 +187,41 @@ def get_system_printers(cups_server="", cups_port=631):
     return printers
 
 
+class PrinterLoaderThread(QThread):
+    """Thread não bloqueante para descoberta rápida de impressoras locais/remotas sem travar a interface."""
+    printers_ready = pyqtSignal(list, str)
+
+    def __init__(self, cups_server="", cups_port=631, default_printer="Salvar como PDF"):
+        super().__init__()
+        self.cups_server = cups_server
+        self.cups_port = cups_port
+        self.default_printer = default_printer
+
+    def run(self):
+        # 1. Aplicar ambiente CUPS sem travar a interface
+        if self.cups_server:
+            target = f"{self.cups_server}:{self.cups_port}" if ":" not in self.cups_server else self.cups_server
+            try:
+                subprocess.check_call(['lpstat', '-h', target, '-r'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1.0)
+                os.environ["CUPS_SERVER"] = target
+            except Exception:
+                if "CUPS_SERVER" in os.environ:
+                    del os.environ["CUPS_SERVER"]
+        elif "CUPS_SERVER" in os.environ:
+            del os.environ["CUPS_SERVER"]
+
+        # 2. Descobrir impressoras
+        printers = ["Salvar como PDF"]
+        try:
+            detected = get_system_printers(self.cups_server, self.cups_port)
+            for p in detected:
+                if p not in printers:
+                    printers.append(p)
+        except Exception:
+            pass
+        self.printers_ready.emit(printers, self.default_printer)
+
+
 def is_monochrome_printer(printer_name, cups_server=""):
     """Detecta se uma impressora é monocromática (apenas Preto e Branco)."""
     if not printer_name or printer_name == "Salvar como PDF":
@@ -201,7 +236,7 @@ def is_monochrome_printer(printer_name, cups_server=""):
             if "CUPS_SERVER" in env:
                 del env["CUPS_SERVER"]
 
-        output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, env=env)
+        output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, env=env, timeout=1.0)
         
         color_found = False
         mono_only = False
@@ -249,7 +284,7 @@ def get_printer_trays(printer_name, cups_server=""):
             if "CUPS_SERVER" in env:
                 del env["CUPS_SERVER"]
 
-        output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, env=env)
+        output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, env=env, timeout=1.0)
 
         slot_line = None
         for line in output.splitlines():
@@ -1805,10 +1840,10 @@ class PrintManagerApp(QMainWindow):
         self.current_preview_img = ""
         self.theme_mode = "system"
         self.settings = load_settings()
-        self.apply_cups_environment()
         self.initUI()
         if sys.platform.startswith("linux"):
-            self.integrate_with_system(silent=True)
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(800, lambda: self.integrate_with_system(silent=True))
 
     def apply_cups_environment(self):
         server = self.settings.get("cups_server", "").strip()
@@ -1816,7 +1851,7 @@ class PrintManagerApp(QMainWindow):
         if server:
             target = f"{server}:{port}" if ":" not in server else server
             try:
-                subprocess.check_call(['lpstat', '-h', target, '-r'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+                subprocess.check_call(['lpstat', '-h', target, '-r'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1.0)
                 os.environ["CUPS_SERVER"] = target
                 return
             except Exception:
@@ -1830,7 +1865,15 @@ class PrintManagerApp(QMainWindow):
         icon_path = os.path.join(base_dir, "icon.png")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
-        self.resize(1050, 740)
+        self.setMinimumSize(760, 480)
+        screen = QApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            target_w = min(1050, max(760, int(avail.width() * 0.92)))
+            target_h = min(740, max(480, int(avail.height() * 0.88)))
+            self.resize(target_w, target_h)
+        else:
+            self.resize(1050, 720)
         self.setAcceptDrops(True)
 
         self.create_menu_bar()
@@ -1842,7 +1885,8 @@ class PrintManagerApp(QMainWindow):
 
         # Painel Esquerdo (Controles e Opções)
         left_panel = QVBoxLayout()
-        left_panel.setSpacing(12)
+        left_panel.setSpacing(8)
+        left_panel.setContentsMargins(0, 0, 0, 0)
 
         # 1. Seleção de Documento
         group_file = QGroupBox("1. Seleção de Documento")
@@ -1906,7 +1950,6 @@ class PrintManagerApp(QMainWindow):
         vbox_file.addWidget(self.drop_frame)
         vbox_file.addLayout(file_info_layout)
         group_file.setLayout(vbox_file)
-        left_panel.addWidget(group_file)
 
         # 2. Configurações de Impressão
         group_opts = QGroupBox("2. Configurações de Impressão")
@@ -1914,7 +1957,8 @@ class PrintManagerApp(QMainWindow):
         form_opts.setContentsMargins(12, 14, 12, 12)
         form_opts.setVerticalSpacing(8)
         form_opts.setHorizontalSpacing(10)
-
+        form_opts.setLabelAlignment(Qt.AlignLeft)
+        form_opts.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         self.cb_printers = QComboBox()
         form_opts.addRow("Impressora:", self.cb_printers)
@@ -1973,14 +2017,45 @@ class PrintManagerApp(QMainWindow):
         self.cb_poster.currentIndexChanged.connect(self.on_poster_changed)
         form_opts.addRow("Modo Cartaz (Pôster):", self.cb_poster)
 
-        group_opts.setLayout(form_opts)
-        left_panel.addWidget(group_opts)
+        # Política de expansão uniforme para que TODOS os inputs tenham a mesma largura perfeita
+        for widget in [
+            self.cb_printers, self.sp_copies, self.txt_page_range,
+            self.cb_paper_size, self.cb_tray, self.cb_orientation,
+            self.cb_scaling_mode, self.sp_custom_scale, self.cb_duplex,
+            self.cb_color, self.cb_nup, self.cb_poster
+        ]:
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        # Status & Barra de Progresso
+        group_opts.setLayout(form_opts)
+
+        # ScrollArea elegante para as seções de seleção e configuração
+        # Permite que a janela diminua livremente sem estourar em monitores 768p ou com escala do Plasma
+        scroll_controls = QScrollArea()
+        scroll_controls.setWidgetResizable(True)
+        scroll_controls.setFrameShape(QFrame.NoFrame)
+        scroll_controls.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 4, 0)
+        scroll_layout.setSpacing(10)
+        scroll_layout.addWidget(group_file)
+        scroll_layout.addWidget(group_opts)
+        scroll_layout.addStretch()
+
+        scroll_controls.setWidget(scroll_content)
+        left_panel.addWidget(scroll_controls, stretch=1)
+
+        # Painel Fixo no Rodapé: Status, Progresso e Botão de Ação
+        # Fica sempre visível e acessível sem precisar de rolagem
+        bottom_panel = QVBoxLayout()
+        bottom_panel.setContentsMargins(0, 4, 0, 0)
+        bottom_panel.setSpacing(6)
+
         self.lbl_status = QLabel("")
         self.lbl_status.setStyleSheet("color: #0284C7; font-weight: bold;")
         self.lbl_status.setAlignment(Qt.AlignCenter)
-        left_panel.addWidget(self.lbl_status)
+        bottom_panel.addWidget(self.lbl_status)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setFixedHeight(8)
@@ -1988,13 +2063,14 @@ class PrintManagerApp(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(False)
-        left_panel.addWidget(self.progress_bar)
+        bottom_panel.addWidget(self.progress_bar)
 
-        # Botão Ação
         self.btn_action = QPushButton("PROCESSAR E IMPRIMIR (Ctrl+P)")
         self.btn_action.setMinimumHeight(44)
         self.btn_action.clicked.connect(self.process_and_print)
-        left_panel.addWidget(self.btn_action)
+        bottom_panel.addWidget(self.btn_action)
+
+        left_panel.addLayout(bottom_panel)
 
         left_widget = QWidget()
         left_widget.setLayout(left_panel)
@@ -2137,24 +2213,36 @@ class PrintManagerApp(QMainWindow):
     def load_printers(self):
         if not hasattr(self, 'cb_printers'):
             return
-        self.cb_printers.blockSignals(True)
-        self.cb_printers.clear()
+        
+        # Inicia imediatamente com 'Salvar como PDF' para renderização instantânea da janela
+        if self.cb_printers.count() == 0:
+            self.cb_printers.blockSignals(True)
+            self.cb_printers.addItem("Salvar como PDF")
+            self.cb_printers.blockSignals(False)
 
-        printers = ["Salvar como PDF"]
         server = self.settings.get("cups_server", "").strip()
         port = self.settings.get("cups_port", 631)
-
-        detected = get_system_printers(server, port)
-        for p in detected:
-            if p not in printers:
-                printers.append(p)
-
-        self.cb_printers.addItems(printers)
         default_printer = self.settings.get("default_printer", "Salvar como PDF")
-        idx = self.cb_printers.findText(default_printer)
+
+        # Dispara thread em segundo plano para descoberta de impressoras sem travar a interface
+        self.printer_loader = PrinterLoaderThread(server, port, default_printer)
+        self.printer_loader.printers_ready.connect(self.on_printers_loaded)
+        self.printer_loader.start()
+
+    def on_printers_loaded(self, printers, default_printer):
+        if not hasattr(self, 'cb_printers'):
+            return
+        curr_text = self.cb_printers.currentText()
+        self.cb_printers.blockSignals(True)
+        self.cb_printers.clear()
+        self.cb_printers.addItems(printers)
+
+        target = curr_text if (curr_text and curr_text in printers) else default_printer
+        idx = self.cb_printers.findText(target)
         if idx >= 0:
             self.cb_printers.setCurrentIndex(idx)
         self.cb_printers.blockSignals(False)
+        self.on_printer_changed()
 
     def update_trays(self, printer_name="", cups_server=""):
         if not hasattr(self, 'cb_tray'):
@@ -2295,9 +2383,33 @@ class PrintManagerApp(QMainWindow):
                 border-radius: 8px;
                 padding: 10px;
             }}
+            QScrollArea {{
+                border: none;
+                background: transparent;
+            }}
         """
         self.setStyleSheet(qss)
-        self.btn_action.setStyleSheet("background-color: #10B981; color: white; font-size: 14px; font-weight: bold; border-radius: 6px; border: none;")
+        self.btn_action.setStyleSheet("""
+            QPushButton {
+                background-color: #10B981;
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+                border-radius: 6px;
+                border: none;
+                padding: 8px;
+            }
+            QPushButton:hover {
+                background-color: #059669;
+            }
+            QPushButton:pressed {
+                background-color: #047857;
+            }
+            QPushButton:disabled {
+                background-color: #6EE7B7;
+                color: #D1FAE5;
+            }
+        """)
 
 
     def is_current_file_landscape(self):
@@ -2755,6 +2867,10 @@ del "%~f0"
             apps_dir = os.path.join(home, ".local", "share", "applications")
             desktop_path = os.path.join(apps_dir, "gerenciador-impressoes.desktop")
 
+            # Se já estiver integrado e for checagem silenciosa de inicialização, ignora para abrir instantaneamente
+            if silent and os.path.exists(desktop_path):
+                return
+
             # 1. Determinar o executável correto
             appimage_path = os.environ.get("APPIMAGE")
             if appimage_path and os.path.exists(appimage_path):
@@ -2786,8 +2902,9 @@ del "%~f0"
                         sz_dir = os.path.join(icons_base, f"{sz}x{sz}", "apps")
                         os.makedirs(sz_dir, exist_ok=True)
                         dest_file = os.path.join(sz_dir, "gerenciador-impressoes.png")
-                        resized = src_img.resize((sz, sz), Image.Resampling.LANCZOS)
-                        resized.save(dest_file)
+                        if not os.path.exists(dest_file):
+                            resized = src_img.resize((sz, sz), Image.Resampling.LANCZOS)
+                            resized.save(dest_file)
                 except Exception:
                     sz_dir = os.path.join(icons_base, "256x256", "apps")
                     os.makedirs(sz_dir, exist_ok=True)
@@ -2814,33 +2931,49 @@ StartupNotify=true
             os.chmod(desktop_path, 0o755)
 
             # 5. Atualizar bancos de dados do ambiente desktop
-            try:
-                subprocess.run(["update-desktop-database", apps_dir], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
-            try:
-                subprocess.run(["kbuildsycoca6"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
+            if not silent:
                 try:
-                    subprocess.run(["kbuildsycoca5"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(["update-desktop-database", apps_dir], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception:
                     pass
-
-            if not silent:
+                try:
+                    subprocess.run(["kbuildsycoca6"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    try:
+                        subprocess.run(["kbuildsycoca5"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        pass
                 QMessageBox.information(
                     self, "Integração Concluída",
                     "O Gerenciador de Impressões Pro foi integrado com sucesso ao sistema!\n\n"
                     "• Ícone oficial adicionado ao lançador de aplicativos do BigLinux.\n"
                     "• Habilitada a opção 'Abrir com...' no menu de contexto (botão direito) do Dolphin para PDF, Word, Planilhas, Slides e Textos."
                 )
+            else:
+                # Disparo assíncrono para não atrasar a inicialização da interface
+                try:
+                    subprocess.Popen(["update-desktop-database", apps_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+                try:
+                    subprocess.Popen(["kbuildsycoca6"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    try:
+                        subprocess.Popen(["kbuildsycoca5"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        pass
         except Exception as e:
             if not silent:
                 QMessageBox.warning(self, "Falha na Integração", f"Não foi possível concluir a integração com o sistema:\n{str(e)}")
 
 
 if __name__ == "__main__":
+    if hasattr(Qt, 'AA_EnableHighDpiScaling'):
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+
     app = QApplication(sys.argv)
-    app.setStyle("Breeze")
 
     window = PrintManagerApp()
 

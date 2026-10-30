@@ -5,3 +5,4 @@ dist/
 AppDir/
 Gerenciador_Impressoes_Pro.AppImage
 *.spec
+*.code-workspace
