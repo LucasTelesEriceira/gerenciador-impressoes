@@ -131,6 +131,9 @@ jobs:
           #!/bin/sh
           HERE="$(dirname "$(readlink -f "${0}")")"
 
+          # Preservar LD_LIBRARY_PATH original do sistema host para comandos externos (pdftoppm, libreoffice, etc)
+          export ORIG_LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
+
           # Garantir que o Python encontre os certificados CA raiz do sistema host
           for cert in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem /etc/ssl/cert.pem; do
               if [ -f "$cert" ]; then

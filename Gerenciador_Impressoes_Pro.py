@@ -33,10 +33,28 @@ if "SSL_CERT_FILE" not in os.environ:
             os.environ["SSL_CERT_FILE"] = _ca_bundle
             break
 
-CURRENT_VERSION = "v1.3.1"
+CURRENT_VERSION = "v1.3.2"
 SETTINGS_DIR = os.path.expanduser("~/.config/gerenciador_impressoes_pro")
 SETTINGS_FILE = os.path.join(SETTINGS_DIR, "settings.json")
 HISTORY_FILE = os.path.join(SETTINGS_DIR, "history.json")
+
+
+def get_clean_host_env():
+    """
+    Retorna o ambiente do sistema host limpo de variáveis injetadas pelo AppImage ou PyInstaller
+    (como LD_LIBRARY_PATH, LD_PRELOAD, PYTHONHOME, PYTHONPATH).
+    Isso impede que binários do sistema operacional (pdftoppm, libreoffice, lp, etc.)
+    tentem carregar bibliotecas empacotadas no AppImage que causam incompatibilidade de versão (ex: libstdc++.so.6).
+    """
+    env = os.environ.copy()
+    if "ORIG_LD_LIBRARY_PATH" in env:
+        env["LD_LIBRARY_PATH"] = env["ORIG_LD_LIBRARY_PATH"]
+    else:
+        env.pop("LD_LIBRARY_PATH", None)
+    env.pop("LD_PRELOAD", None)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    return env
 
 SUPPORTED_EXTENSIONS = [
     '.pdf',
@@ -624,7 +642,7 @@ class PreviewWorkerThread(QThread):
 
             if not current_file.lower().endswith('.pdf'):
                 out_dir = "/tmp"
-                subprocess.check_call(["libreoffice", "--headless", "--convert-to", "pdf", current_file, "--outdir", out_dir])
+                subprocess.check_call(["libreoffice", "--headless", "--convert-to", "pdf", current_file, "--outdir", out_dir], env=get_clean_host_env())
                 base = os.path.splitext(os.path.basename(current_file))[0]
                 converted = os.path.join(out_dir, f"{base}.pdf")
                 if os.path.exists(converted):
@@ -701,7 +719,7 @@ class PreviewWorkerThread(QThread):
                     import glob
                     out_prefix = f"/tmp/prev_fast_{os.getpid()}_{preview_page_num}"
                     cmd = ["pdftoppm", "-jpeg", "-jpegopt", "quality=85", "-r", "90", "-f", str(preview_page_num), "-l", str(preview_page_num), current_file, out_prefix]
-                    subprocess.check_call(cmd)
+                    subprocess.check_call(cmd, env=get_clean_host_env())
                     matching = glob.glob(f"{out_prefix}*.jpg") or glob.glob(f"{out_prefix}*.jpeg")
                     if matching:
                         img_path = matching[0]
@@ -737,7 +755,7 @@ class PreviewWorkerThread(QThread):
             import glob
             out_prefix = f"/tmp/prev_{os.getpid()}_{preview_page_num}"
             cmd = ["pdftoppm", "-jpeg", "-jpegopt", "quality=85", "-r", "90", "-f", "1", "-l", "1", current_file, out_prefix]
-            subprocess.check_call(cmd)
+            subprocess.check_call(cmd, env=get_clean_host_env())
 
             matching = glob.glob(f"{out_prefix}*.jpg") or glob.glob(f"{out_prefix}*.jpeg") or glob.glob(f"{out_prefix}*.png")
             if matching:
@@ -789,7 +807,7 @@ class PrintWorkerThread(QThread):
             if not current_file.lower().endswith('.pdf'):
                 self.progress.emit("Convertendo documento para PDF via LibreOffice...")
                 out_dir = "/tmp"
-                subprocess.check_call(["libreoffice", "--headless", "--convert-to", "pdf", current_file, "--outdir", out_dir])
+                subprocess.check_call(["libreoffice", "--headless", "--convert-to", "pdf", current_file, "--outdir", out_dir], env=get_clean_host_env())
                 base = os.path.splitext(os.path.basename(current_file))[0]
                 converted = os.path.join(out_dir, f"{base}.pdf")
                 if os.path.exists(converted):
@@ -932,7 +950,7 @@ class PrintWorkerThread(QThread):
                     media_name = media_map.get(self.paper_size, "A4")
                     lp_args.extend(["-o", f"media={media_name}"])
                     lp_args.append(current_file)
-                    subprocess.check_call(lp_args)
+                    subprocess.check_call(lp_args, env=get_clean_host_env())
                     self.finished_signal.emit(True, f"Enviado com sucesso para a impressora '{self.printer}'!")
 
         except Exception as e:
